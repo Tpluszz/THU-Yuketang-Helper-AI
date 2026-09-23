@@ -9,8 +9,8 @@ import traceback
 import websocket
 
 from Scripts.AI import call_ai
-from Scripts.Utils import (API_BASE, auth_headers, calculate_waittime, dict_result,
-                           get_output_dir, get_user_info, http_get, http_post)
+from Scripts.Utils import (API_BASE, ANSWER_MODES, auth_headers, calculate_waittime,
+                           dict_result, get_output_dir, get_user_info, http_get, http_post)
 
 WSS_URL = "wss://pro.yuketang.cn/wsapp/"
 
@@ -192,6 +192,17 @@ class Lesson:
 
     # ------------------------------------------------------------ 答题
 
+    @property
+    def answer_mode(self):
+        """当前答题模式：notify / saved / ai_confirm / ai_auto。"""
+        mode = self.config.get("answer_config", {}).get("mode")
+        if mode in ANSWER_MODES:
+            return mode
+        # 兜底：老配置只有两个布尔量
+        if not self.config.get("auto_answer", True):
+            return "notify"
+        return "ai_auto" if self.config.get("answer_config", {}).get("auto_ai") else "saved"
+
     def answer_questions(self, problemid, problemtype, answer, limit):
         """提交答案到雨课堂。"""
         if not answer:
@@ -241,7 +252,7 @@ class Lesson:
         return False
 
     def handle_pushed_problem(self, problemid, limit):
-        """处理一道课上推送的题目：已答过则跳过；开启自动答题则作答，否则仅提示。"""
+        """处理一道课上推送的题目：已答过则跳过，否则按 answer_mode 决定做到哪一步。"""
         if problemid is None:
             return
         problem = self.find_problem(problemid)
@@ -256,14 +267,22 @@ class Lesson:
         if problem.get("result") is not None:
             return          # 已作答过，忽略
 
-        if self.config.get("auto_answer"):
-            self.start_answer(problemid, limit)
-        else:
-            if limit in (-1, 0):
-                meg = "%s 推送了新题目（第%s页），该题不限时" % (self.lessonname, problem.get("page", "?"))
-            else:
-                meg = "%s 推送了新题目（第%s页），剩余 %s 秒" % (self.lessonname, problem.get("page", "?"), limit)
-            self.add_message(meg, 7)
+        page = problem.get("page", "?")
+        window = "该题不限时" if limit in (-1, 0) else "剩余 %s 秒" % limit
+        mode = self.answer_mode
+
+        if mode == "notify":
+            self.add_message("%s 推送了新题目（第%s页），%s，请自行前往雨课堂作答"
+                             % (self.lessonname, page, window), 7)
+            return
+        if mode == "saved" and not problem.get("answers"):
+            # 「只提交已保存答案」模式下绝不偷偷调用 AI
+            self.add_message("%s 第%s页还没有保存答案，%s，请手动作答或打开题目让 AI 解答"
+                             % (self.lessonname, page, window), 8)
+            return
+
+        self.add_message("%s 推送了新题目（第%s页），%s" % (self.lessonname, page, window), 7)
+        self.start_answer(problemid, limit)
 
     def start_answer(self, problemid, limit):
         """在后台线程里完成「（可选）AI 解答 → 等待 → 提交」的流程。"""
@@ -276,29 +295,55 @@ class Lesson:
 
     def _answer_worker(self, problem, limit):
         answers = problem.get("answers") or []
-        auto_ai = self.config.get("answer_config", {}).get("auto_ai", False)
+        mode = self.answer_mode
+        page = problem.get("page", "?")
 
-        if not answers and auto_ai:
+        if not answers and mode in ("ai_confirm", "ai_auto"):
             started = time.time()
-            self.add_message("%s 第%s页题目尚无答案，正在调用 AI 解答……"
-                             % (self.lessonname, problem.get("page", "?")), 0)
+            self.add_message("%s 第%s页题目尚无答案，正在调用 AI 解答……" % (self.lessonname, page), 0)
             try:
                 answers = call_ai(self.config, problem.get("image"))
                 problem["answers"] = answers
                 self.notify_update()
-                self.add_message("%s 第%s页 AI 给出答案：%s"
-                                 % (self.lessonname, problem.get("page", "?"), answers), 0)
+                self.add_message("%s 第%s页 AI 给出答案：%s" % (self.lessonname, page, answers), 0)
             except Exception as exc:
-                self.add_message("%s 第%s页 AI 解答失败：%s"
-                                 % (self.lessonname, problem.get("page", "?"), exc), 4)
+                self.add_message("%s 第%s页 AI 解答失败：%s" % (self.lessonname, page, exc), 4)
             # AI 花掉的时间要从剩余答题时间里扣除
             if limit not in (-1, 0):
                 limit = max(0, int(limit - (time.time() - started)))
+
+            # 确认模式：先让用户过目，同意了才提交
+            if answers and mode == "ai_confirm":
+                if not self._ask_confirm(problem, answers, limit):
+                    self.add_message("%s 第%s页未确认，已跳过提交（答案已保留，可手动提交）"
+                                     % (self.lessonname, page), 8)
+                    return
 
         payload = answers
         if problem.get("problemType") == TYPE_SUBJECTIVE and answers:
             payload = {"content": answers[0], "pics": []}
         self.answer_questions(problem.get("problemId"), problem.get("problemType"), payload, limit)
+
+    def _ask_confirm(self, problem, answers, limit):
+        """ai_confirm 模式：请 UI 弹出确认框，阻塞本工作线程等待结果。"""
+        ask = getattr(self.main_ui, "confirm_answer", None)
+        if ask is None:
+            return True             # UI 不支持确认（如测试桩），按同意处理
+        timeout = self.config.get("answer_config", {}).get("confirm_timeout", 60)
+        if limit not in (-1, 0):
+            # 留 3 秒余量给提交本身
+            timeout = min(timeout, max(1, limit - 3))
+        decision = {"ok": False}
+        done = threading.Event()
+
+        def on_decided(ok):
+            decision["ok"] = ok
+            done.set()
+
+        ask(self, problem, answers, timeout, on_decided)
+        if not done.wait(timeout + 5):
+            return False            # UI 没回应，保守起见不提交
+        return decision["ok"]
 
     def solve_with_ai(self, problem):
         """给单道题调用 AI，写回 answers 并返回结果（供 UI 调用）。"""

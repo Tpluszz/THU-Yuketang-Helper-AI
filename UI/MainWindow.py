@@ -11,6 +11,7 @@ import requests
 from Scripts.Classes import Lesson
 from Scripts.Utils import get_config_dir, get_on_lesson, load_config, save_config, test_network
 from UI import Theme
+from UI.ConfirmDialog import ConfirmAnswerDialog
 from UI.Config import ConfigDialog
 from UI.Login import LoginDialog
 from UI.ProblemListWindow import ProblemListWindow
@@ -233,8 +234,9 @@ class MainWindow:
 
     def refresh_account_state(self):
         """刷新标题栏的登录信息与状态栏的 AI 配置摘要。"""
+        from Scripts.AI import PROVIDERS, normalize_provider
         ai = self.config.get("ai_config", {})
-        provider = "GLM" if ai.get("provider", "glm") != "qwen" else "通义千问"
+        provider = PROVIDERS[normalize_provider(ai.get("provider"))]["label"].split("（")[0]
         if ai.get("api_key"):
             self.ai_label.config(text="AI：%s · %s" % (provider, ai.get("model") or "默认模型"),
                                  fg=Theme.C["muted"])
@@ -282,6 +284,23 @@ class MainWindow:
             existing.focus()
             return
         self.problem_windows[lessonid] = ProblemListWindow(self.master, lesson, self)
+
+    def confirm_answer(self, lesson, problem, answers, timeout, on_decided):
+        """ai_confirm 模式下由课程线程调用：在主线程弹确认框，结果通过回调返回。"""
+        def show():
+            try:
+                ConfirmAnswerDialog(self.master, lesson, problem, answers, timeout, on_decided)
+            except Exception as exc:
+                self.add_message("确认框弹出失败，已跳过提交：%s" % exc, 4)
+                on_decided(False)
+
+        if self._closed:
+            on_decided(False)
+            return
+        try:
+            self.master.after(0, show)
+        except (tk.TclError, RuntimeError):
+            on_decided(False)
 
     def on_lesson_updated(self, lesson=None):
         """题目/答案发生变化时由 Lesson 回调，刷新相关界面。"""

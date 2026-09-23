@@ -95,16 +95,24 @@ def get_initial_data():
         "danmu_config": {
             "danmu_limit": 5,
         },
+        # auto_answer / auto_ai 是旧字段，保留只为向下兼容，实际以 mode 为准
         "auto_answer": True,
         "answer_config": {
             "answer_delay": {
                 "type": 1,
                 "custom": {"time": 0},
             },
-            "auto_ai": False,               # 收到新题目时自动调用 AI 作答
+            "auto_ai": False,
+            # 课上推送新题目时怎么做：
+            #   notify      仅提示，什么都不做
+            #   saved       只提交我事先保存好的答案，没答案就提示
+            #   ai_confirm  没答案时让 AI 解答，弹确认框，我同意才提交
+            #   ai_auto     没答案时让 AI 解答并直接提交
+            "mode": "saved",
+            "confirm_timeout": 60,          # ai_confirm 的确认框等待秒数
         },
         "ai_config": {
-            "provider": "glm",
+            "provider": "anthropic",
             "api_key": "",
             "base_url": "https://sec.llm.autos",
             "model": "glm-5.3-flash",
@@ -127,6 +135,28 @@ def merge_defaults(config, defaults=None):
     return merged
 
 
+ANSWER_MODES = ("notify", "saved", "ai_confirm", "ai_auto")
+
+
+def migrate_answer_mode(config):
+    """把旧的 auto_answer / auto_ai 两个布尔量折算成 answer_config.mode。"""
+    answer = config.setdefault("answer_config", {})
+    mode = answer.get("mode")
+    if mode in ANSWER_MODES:
+        pass
+    elif not config.get("auto_answer", True):
+        mode = "notify"
+    elif answer.get("auto_ai"):
+        mode = "ai_auto"
+    else:
+        mode = "saved"
+    answer["mode"] = mode
+    # 反向同步，保证旧字段与 mode 不打架
+    config["auto_answer"] = mode != "notify"
+    answer["auto_ai"] = mode in ("ai_confirm", "ai_auto")
+    return config
+
+
 def load_config():
     """读取配置文件；文件损坏或缺失时回落到默认配置。"""
     path = get_config_path()
@@ -143,6 +173,12 @@ def load_config():
                 pass
             data = {}
     config = merge_defaults(data)
+    # 老配置迁移：把 auto_answer/auto_ai 折算成 mode，并归一 provider 名
+    if data:
+        config["answer_config"]["mode"] = migrate_answer_mode(dict(data))["answer_config"]["mode"]
+    migrate_answer_mode(config)
+    from Scripts.AI import normalize_provider
+    config["ai_config"]["provider"] = normalize_provider(config["ai_config"].get("provider"))
     if config != data:
         save_config(config)
     return config

@@ -45,7 +45,7 @@ class MockUI:
     def __init__(self):
         self.config = {"sessionid": "s", "auto_answer": True,
                        "answer_config": {"answer_delay": {"type": 2, "custom": {"time": 0}},
-                                         "auto_ai": False},
+                                         "mode": "saved"},
                        "auto_danmu": False, "danmu_config": {"danmu_limit": 5}}
     def add_message(self, m, t=0): MSGS.append((t, m))
     def on_lesson_updated(self, lesson): pass
@@ -67,10 +67,11 @@ L.on_message(ws, json.dumps({
 assert [p["problemId"] for p in L.problems_ls] == ["p1", "p2"], L.problems_ls
 print("✓ hello：从 timeline 抓到 2 道题，重复课件已去重")
 
-# p1 应被自动作答；但它没有 answers，所以只会提示找不到答案
+# 默认 saved 模式：p1 没有 answers，应只提示、不调用 AI、不提交
 time.sleep(0.3)
-assert any("没有找到答案" in m for _, m in MSGS), MSGS[-3:]
-print("✓ 无答案的推送题目：提示人工作答，未误提交")
+assert any("还没有保存答案" in m for _, m in MSGS), MSGS[-3:]
+assert not [u for u, b in POSTED if "problem/answer" in u], "无答案却提交了"
+print("✓ 无答案的推送题目（saved 模式）：提示人工作答，未误提交")
 
 # ---- 事先填好答案再推送，应自动提交并锁题
 L.find_problem("p1")["answers"] = ["A"]
