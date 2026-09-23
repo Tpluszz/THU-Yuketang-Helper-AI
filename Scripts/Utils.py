@@ -114,9 +114,11 @@ def get_initial_data():
         "ai_config": {
             "provider": "anthropic",
             "api_key": "",
-            "base_url": "https://sec.llm.autos",
-            "model": "glm-5.3-flash",
-            "enable_thinking": True,
+            # 地址与模型一律不预填：预置一个陌生网关等于把用户的 Key
+            # 默认发到第三方服务器上，必须由用户自己填
+            "base_url": "",
+            "model": "",
+            "thinking_effort": "medium",    # off/minimal/low/medium/high/xhigh
             "concurrency": 3,               # 批量解题的并发数
         },
     }

@@ -38,7 +38,9 @@ python main.py
 
 ## 支持的 AI 接口格式
 
-Base URL 只填到域名，路径由所选格式自动补全。
+Base URL 只填到域名，路径由所选格式自动补全。**不预填任何默认地址和模型**——
+预置一个陌生网关等于把你的 API Key 默认发到第三方服务器上。填好地址和 Key 后，
+点「获取模型列表」可以直接从服务端拉取可用模型，不用凭空猜模型名。
 
 | 格式 | 请求地址 | 适用 |
 | --- | --- | --- |
@@ -46,6 +48,17 @@ Base URL 只填到域名，路径由所选格式自动补全。
 | OpenAI Responses | `{Base URL}/v1/responses` | Codex 等使用 Responses API 的服务 |
 | OpenAI Chat Completions | `{Base URL}/v1/chat/completions` | 最通用的第三方中转 |
 | 通义千问 dashscope | 官方 SDK | 只需 API Key（[获取方法](https://help.aliyun.com/zh/model-studio/get-api-key)） |
+
+### 思考强度
+
+可选 关闭 / 最低 / 低 / 中 / 高 / 极高，界面上会直接显示这一档实际发出去的参数：
+
+- Anthropic 没有档位概念，映射为 `thinking.budget_tokens`（512 ~ 24576），并自动抬高 `max_tokens`
+- OpenAI 两种格式原样透传为 `reasoning.effort` / `reasoning_effort`
+
+各档位能否使用**取决于模型而不是接口**（例如 `xhigh` 需要 gpt-5.1-codex-max 或
+gpt-5.3-codex，普通 gpt-5.1-codex 只到 high），所以这里不做白名单限制；
+模型不支持时服务端会返回 400，程序会提示你调低一档。
 
 ## 答题策略
 

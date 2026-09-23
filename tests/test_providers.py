@@ -6,7 +6,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["HOME"] = tempfile.mkdtemp()
 
 from PIL import Image
-from Scripts.AI import AIError, PROVIDERS, call_ai, normalize_provider, test_connection
+from Scripts.AI import (AIError, EFFORTS, PROVIDERS, call_ai, effort_hint,
+                        normalize_effort, normalize_provider, test_connection)
 
 IMG = os.path.join(tempfile.mkdtemp(), "q.jpg")
 Image.new("RGB", (40, 30), "white").save(IMG)
@@ -38,7 +39,7 @@ BASE = "http://127.0.0.1:%d" % srv.server_address[1]
 
 def cfg(provider, **kw):
     d = {"provider": provider, "api_key": "sk-x", "base_url": BASE,
-         "model": "m-test", "enable_thinking": True}
+         "model": "m-test", "thinking_effort": "medium"}
     d.update(kw); return {"ai_config": d}
 
 # --- Anthropic
@@ -58,9 +59,31 @@ assert SEEN["body"]["max_output_tokens"] == 4096 and SEEN["body"]["reasoning"]["
 assert "anthropic-version" not in SEEN["headers"]
 print("✓ openai_responses：打到 /v1/responses，input_image/input_text，跳过 reasoning 条目")
 
-assert call_ai(cfg("openai_responses", enable_thinking=False), IMG) == ["C"]
-assert SEEN["body"]["reasoning"]["effort"] == "low"
-print("✓ openai_responses：关闭思考时 reasoning.effort 降为 low")
+assert call_ai(cfg("openai_responses", thinking_effort="off"), IMG) == ["C"]
+assert "reasoning" not in SEEN["body"], "关闭时不该发送 reasoning 字段"
+print("✓ openai_responses：关闭思考时干脆不发 reasoning 字段")
+
+# xhigh 必须原样透传（能否用取决于模型，不是接口）
+assert call_ai(cfg("openai_responses", thinking_effort="xhigh"), IMG) == ["C"]
+assert SEEN["body"]["reasoning"]["effort"] == "xhigh", SEEN["body"]
+assert call_ai(cfg("openai_chat", thinking_effort="xhigh"), IMG) == ["D"]
+assert SEEN["body"]["reasoning_effort"] == "xhigh", SEEN["body"]
+print("✓ xhigh 原样透传给 Responses / Chat，不被降档")
+
+# Anthropic 用 budget_tokens 表达，且 max_tokens 必须大于预算
+assert call_ai(cfg("anthropic", thinking_effort="xhigh"), IMG) == ["B"]
+th = SEEN["body"]["thinking"]
+assert th == {"type": "enabled", "budget_tokens": 24576}, th
+assert SEEN["body"]["max_tokens"] > th["budget_tokens"], "max_tokens 必须大于思考预算"
+assert call_ai(cfg("anthropic", thinking_effort="off"), IMG) == ["B"]
+assert SEEN["body"]["thinking"] == {"type": "disabled"}
+print("✓ anthropic：档位映射为 budget_tokens，且 max_tokens 始终大于预算")
+
+# 老的布尔 enable_thinking 仍可用
+assert call_ai({"ai_config": {"provider": "openai_chat", "api_key": "k", "base_url": BASE,
+                              "model": "m", "enable_thinking": False}}, IMG) == ["D"]
+assert "reasoning_effort" not in SEEN["body"]
+print("✓ 老配置 enable_thinking=False 仍等价于关闭思考")
 
 # --- Chat Completions
 assert call_ai(cfg("openai_chat"), IMG) == ["D"]
@@ -73,9 +96,18 @@ assert call_ai(cfg("glm"), IMG) == ["B"], "老的 provider=glm 应当仍然可�
 assert normalize_provider("codex") == "openai_responses"
 print("✓ 兼容：老配置 provider=glm 仍走 Anthropic；codex 归一到 Responses")
 
-# --- Base URL 带尾斜杠/路径残留
-assert call_ai(cfg("anthropic", base_url=BASE + "/"), IMG) == ["B"]
-print("✓ Base URL 末尾斜杠会被正确去掉")
+# --- Base URL 容错：尾斜杠、用户贴了完整路径
+for variant in (BASE + "/", BASE + "/v1", BASE + "/v1/messages"):
+    assert call_ai(cfg("anthropic", base_url=variant), IMG) == ["B"], variant
+print("✓ Base URL 容错：尾斜杠与误贴的完整路径都能纠正")
+
+# --- 不再预填任何默认地址/模型：留空必须明确报错，而不是偷偷发到某个网关
+for missing, kw in (("接口地址", {"base_url": ""}), ("模型名称", {"model": ""})):
+    try:
+        call_ai(cfg("anthropic", **kw), IMG); assert False
+    except AIError as e:
+        assert missing in str(e), e
+print("✓ 地址/模型留空时明确报错，不会悄悄发往任何默认网关")
 
 # --- 404 提示要能指出格式选错了
 try:

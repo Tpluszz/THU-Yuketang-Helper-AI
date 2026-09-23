@@ -8,8 +8,8 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
-from Scripts.AI import (DEFAULT_BASE_URL, DEFAULT_MODEL, PROVIDERS,
-                        normalize_provider)
+from Scripts.AI import (EFFORT_LABELS, EFFORTS, PROVIDERS, effort_hint,
+                        normalize_provider, resolve_effort)
 from Scripts.Utils import ANSWER_MODES, get_config_dir, migrate_answer_mode, save_config
 from UI import Theme
 
@@ -188,20 +188,35 @@ class ConfigDialog:
 
         ttk.Label(self.glm_box, text="接口地址（Base URL）",
                   style="SurfaceSection.TLabel").pack(anchor=tk.W)
-        ttk.Label(self.glm_box, text="只填到域名即可，路径由所选格式自动补全",
-                  style="SurfaceMuted.TLabel").pack(anchor=tk.W)
-        self.ai_base_url_var = tk.StringVar(value=DEFAULT_BASE_URL)
-        ttk.Entry(self.glm_box, textvariable=self.ai_base_url_var).pack(fill=tk.X, pady=(6, 12))
+        self.ai_base_url_var = tk.StringVar()
+        ttk.Entry(self.glm_box, textvariable=self.ai_base_url_var).pack(fill=tk.X, pady=(6, 2))
+        self.url_hint = ttk.Label(self.glm_box, text="", style="SurfaceMuted.TLabel")
+        self.url_hint.pack(anchor=tk.W, pady=(0, 10))
 
         ttk.Label(self.glm_box, text="模型名称", style="SurfaceSection.TLabel").pack(anchor=tk.W)
-        self.ai_model_var = tk.StringVar(value=DEFAULT_MODEL)
-        ttk.Entry(self.glm_box, textvariable=self.ai_model_var).pack(fill=tk.X, pady=(6, 12))
+        model_row = ttk.Frame(self.glm_box, style="Surface.TFrame")
+        model_row.pack(fill=tk.X, pady=(6, 2))
+        self.ai_model_var = tk.StringVar()
+        self.model_combo = ttk.Combobox(model_row, textvariable=self.ai_model_var, values=[])
+        self.model_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.fetch_models_btn = ttk.Button(model_row, text="获取模型列表", width=12,
+                                           command=self.on_fetch_models)
+        self.fetch_models_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.model_hint = ttk.Label(self.glm_box, text="", style="SurfaceMuted.TLabel",
+                                    wraplength=470, justify=tk.LEFT)
+        self.model_hint.pack(anchor=tk.W, pady=(0, 10))
 
-        self.ai_thinking_var = tk.BooleanVar(value=True)
-        self.ai_thinking_check = ttk.Checkbutton(
-            self.glm_box, text="启用思考模式（正确率更高，但更慢、更费 token）",
-            variable=self.ai_thinking_var, style="Surface.TCheckbutton")
-        self.ai_thinking_check.pack(anchor=tk.W)
+        ttk.Label(self.glm_box, text="思考强度", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        effort_row = ttk.Frame(self.glm_box, style="Surface.TFrame")
+        effort_row.pack(fill=tk.X, pady=(6, 2))
+        self.effort_var = tk.StringVar(value=EFFORT_LABELS["medium"])
+        self.effort_combo = ttk.Combobox(
+            effort_row, textvariable=self.effort_var, state="readonly", width=14,
+            values=[EFFORT_LABELS[e] for e in EFFORTS])
+        self.effort_combo.pack(side=tk.LEFT)
+        self.effort_combo.bind("<<ComboboxSelected>>", lambda _: self.update_effort_hint())
+        self.effort_hint = ttk.Label(effort_row, text="", style="SurfaceMuted.TLabel")
+        self.effort_hint.pack(side=tk.LEFT, padx=10)
 
         ttk.Separator(tab).pack(fill=tk.X, pady=14)
 
@@ -263,24 +278,60 @@ class ConfigDialog:
         return self._provider_keys[0]
 
     def toggle_provider(self):
-        """切换接口格式：更新说明文字、按需启用 Base URL / 思考模式，并带出默认值。"""
+        """切换接口格式：更新提示文字、按需启用相关控件。地址与模型一律不预填。"""
         provider = self.current_provider()
         meta = PROVIDERS[provider]
-        self.provider_hint.config(text=meta["hint"])
+        self.provider_hint.config(
+            text="请求地址 = 接口地址 + %s" % meta["path"] if meta["path"] else meta.get("hint", ""))
         self._set_state(self.glm_box, meta["needs_url"])
-        if not meta["thinking"]:
+        self.url_hint.config(text="例：%s（只填到域名，路径自动补全）" % meta["url_example"]
+                             if meta["url_example"] else "")
+        self.model_hint.config(text="例：%s —— 填好地址和 Key 后可点「获取模型列表」拉取"
+                                    % meta["model_example"])
+        if meta["reasoning"] == "none":
             try:
-                self.ai_thinking_check.state(["disabled"])
+                self.effort_combo.state(["disabled"])
             except tk.TclError:
                 pass
-        # 换格式时，如果当前值还是别的格式的默认值，就顺手换成新格式的默认值
-        if meta["needs_url"]:
-            if self.ai_base_url_var.get().strip() in ("",) + tuple(
-                    PROVIDERS[k]["base_url"] for k in self._provider_keys):
-                self.ai_base_url_var.set(meta["base_url"])
-        if self.ai_model_var.get().strip() in ("",) + tuple(
-                PROVIDERS[k]["model"] for k in self._provider_keys):
-            self.ai_model_var.set(meta["model"])
+        self.update_effort_hint()
+
+    def current_effort(self):
+        label = self.effort_var.get()
+        for key, text in EFFORT_LABELS.items():
+            if text == label:
+                return key
+        return "medium"
+
+    def update_effort_hint(self):
+        self.effort_hint.config(text=effort_hint(self.current_provider(), self.current_effort()))
+
+    def on_fetch_models(self):
+        """向服务端要一份模型列表，填进下拉框，省得用户凭空猜模型名。"""
+        from Scripts.AI import list_models
+
+        ai_config = self._read_ai_config()
+        self.fetch_models_btn.state(["disabled"])
+        self.model_hint.config(text="正在获取模型列表……", foreground=Theme.C["muted"])
+
+        def work():
+            try:
+                models = list_models(ai_config)
+            except Exception as exc:
+                self._ui(lambda: self.model_hint.config(text="✗ %s" % exc,
+                                                        foreground=Theme.C["danger"]))
+            else:
+                self._ui(lambda: self._fill_models(models))
+            finally:
+                self._ui(lambda: self.fetch_models_btn.state(["!disabled"]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fill_models(self, models):
+        self.model_combo.configure(values=models)
+        self.model_hint.config(text="✓ 共 %d 个模型，点输入框右侧下拉选择" % len(models),
+                               foreground=Theme.C["success"])
+        if not self.ai_model_var.get().strip() and models:
+            self.ai_model_var.set(models[0])
 
     def _set_state(self, container, enabled):
         """递归启用/禁用一组控件；纯文本标签只改颜色，避免 clam 主题画出难看的底色。"""
@@ -327,10 +378,10 @@ class ConfigDialog:
         ai_config = self.config.get("ai_config", {})
         provider = normalize_provider(ai_config.get("provider"))
         self.ai_provider_var.set(PROVIDERS[provider]["label"])
-        self.ai_base_url_var.set(ai_config.get("base_url", DEFAULT_BASE_URL))
-        self.ai_model_var.set(ai_config.get("model", DEFAULT_MODEL))
+        self.ai_base_url_var.set(ai_config.get("base_url", ""))
+        self.ai_model_var.set(ai_config.get("model", ""))
         self.ai_key_var.set(ai_config.get("api_key", ""))
-        self.ai_thinking_var.set(ai_config.get("enable_thinking", True))
+        self.effort_var.set(EFFORT_LABELS[resolve_effort(ai_config)])
         self.concurrency_var.set(ai_config.get("concurrency", 3))
 
         self.theme_var.set(self.config.get("ui_theme", "auto"))
@@ -343,9 +394,9 @@ class ConfigDialog:
         return {
             "provider": self.current_provider(),
             "api_key": self.ai_key_var.get().strip(),
-            "base_url": self.ai_base_url_var.get().strip() or DEFAULT_BASE_URL,
-            "model": self.ai_model_var.get().strip() or DEFAULT_MODEL,
-            "enable_thinking": self.ai_thinking_var.get(),
+            "base_url": self.ai_base_url_var.get().strip(),
+            "model": self.ai_model_var.get().strip(),
+            "thinking_effort": self.current_effort(),
             "concurrency": max(1, min(8, self._safe_int(self.concurrency_var, 3))),
         }
 

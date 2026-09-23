@@ -28,48 +28,68 @@ REVIEW_PROMPT = ('请复核图片中这道题的答案。候选答案是：%s\n'
                  '如果不正确，返回 {"ok": false, "answer": [你认为正确的答案], "reason": "一句话说明理由"}。'
                  '答案格式与原题一致（选择题用 A/B/C/... ，填空题按空的顺序给出）。只返回 JSON。')
 
-# 各接口格式的元信息，UI 直接读这里渲染
+# 各接口格式的元信息，UI 直接读这里渲染。
+# 注意：base_url / model 一律不预填默认值——预填一个陌生网关等于把用户的
+# API Key 默认发到第三方服务器上。示例只作为输入框下方的灰字提示。
 PROVIDERS = {
     "anthropic": {
-        "label": "Anthropic 格式（GLM / Claude / 兼容网关）",
-        "hint": "POST {Base URL}/v1/messages",
+        "label": "Anthropic 格式（Claude / GLM / 兼容网关）",
+        "path": "/v1/messages",
         "needs_url": True,
-        "base_url": "https://sec.llm.autos",
-        "model": "glm-5.3-flash",
-        "thinking": True,
+        "url_example": "https://api.anthropic.com",
+        "model_example": "claude-sonnet-5 / glm-5.3-flash",
+        "reasoning": "anthropic",
     },
     "openai_responses": {
         "label": "OpenAI Responses 格式（Codex）",
-        "hint": "POST {Base URL}/v1/responses",
+        "path": "/v1/responses",
         "needs_url": True,
-        "base_url": "https://api.openai.com",
-        "model": "gpt-5.1-codex",
-        "thinking": True,
+        "url_example": "https://api.openai.com",
+        "model_example": "gpt-5.1-codex",
+        "reasoning": "effort",
     },
     "openai_chat": {
         "label": "OpenAI Chat Completions 格式",
-        "hint": "POST {Base URL}/v1/chat/completions",
+        "path": "/v1/chat/completions",
         "needs_url": True,
-        "base_url": "https://api.openai.com",
-        "model": "gpt-4o",
-        "thinking": False,
+        "url_example": "https://api.openai.com",
+        "model_example": "gpt-4o",
+        "reasoning": "effort",
     },
     "qwen": {
         "label": "通义千问 Qwen（dashscope SDK）",
-        "hint": "使用 dashscope 官方 SDK，无需填 Base URL",
+        "path": "",
         "needs_url": False,
-        "base_url": "",
-        "model": "qwen-vl-max-latest",
-        "thinking": False,
+        "url_example": "",
+        "model_example": "qwen-vl-max-latest",
+        "reasoning": "none",
     },
 }
+
+# 思考强度档位。
+# 注意：OpenAI 侧可用的档位是【按模型】而不是按接口变的——gpt-5.1-codex-max、
+# gpt-5.3-codex 支持 xhigh，普通 gpt-5.1-codex 只到 high。静态写死白名单必然会
+# 过时，所以这里全档位都暴露、原样透传，由服务端决定认不认；被拒时 _post 会把
+# 原因翻成人话。Anthropic 没有档位概念，用 thinking.budget_tokens 数值表达。
+EFFORT_LABELS = {
+    "off":     "关闭",
+    "minimal": "最低",
+    "low":     "低",
+    "medium":  "中",
+    "high":    "高",
+    "xhigh":   "极高",
+}
+EFFORTS = tuple(EFFORT_LABELS)
+# Anthropic 各档对应的思考预算（token）
+EFFORT_BUDGET = {"minimal": 512, "low": 1024, "medium": 4096,
+                 "high": 12288, "xhigh": 24576}
 
 # 老配置里的 provider 名
 ALIASES = {"glm": "anthropic", "openai": "openai_chat", "codex": "openai_responses"}
 
 DEFAULT_PROVIDER = "anthropic"
-DEFAULT_BASE_URL = PROVIDERS["anthropic"]["base_url"]
-DEFAULT_MODEL = PROVIDERS["anthropic"]["model"]
+DEFAULT_BASE_URL = ""       # 故意留空：必须由用户显式填写
+DEFAULT_MODEL = ""
 
 RETRYABLE = (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
 MAX_RETRY = 2
@@ -163,6 +183,13 @@ def _post(url, headers, body, timeout=TIMEOUT):
         raise AIError("接口地址不对（HTTP 404）：%s\n请检查 Base URL 与所选接口格式是否匹配" % url)
     if r.status_code == 429:
         raise AIError("请求过于频繁，已被限流（HTTP 429），可在设置中调低并发数")
+    if r.status_code == 400:
+        detail = r.text[:400]
+        low = detail.lower()
+        if any(k in low for k in ("reasoning", "effort", "thinking", "budget")):
+            raise AIError("当前模型不支持所选的思考强度：%s\n"
+                          "请在「设置 → AI 服务」里把思考强度调低一档再试。" % detail)
+        raise AIError("请求被拒绝（HTTP 400）：%s" % detail)
     if r.status_code != 200:
         raise AIError("接口返回状态码 %s：%s" % (r.status_code, r.text[:300]))
     try:
@@ -171,13 +198,68 @@ def _post(url, headers, body, timeout=TIMEOUT):
         raise AIError("接口返回的不是 JSON：%s" % r.text[:200])
 
 
+def _require_model(model):
+    model = (model or "").strip()
+    if not model:
+        raise AIError("请先在「设置 → AI 服务」里填写模型名称"
+                      "（可点「获取模型列表」从服务端拉取）")
+    return model
+
+
 def _base(base_url, provider):
-    return (base_url or PROVIDERS[provider]["base_url"]).rstrip("/")
+    """归一化 Base URL：必须由用户提供，顺带容忍用户把完整路径贴进来。"""
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        raise AIError("请先在「设置 → AI 服务」里填写接口地址（Base URL）")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    # 用户可能直接贴了 .../v1/messages 这种完整地址，去掉重复的尾巴
+    for suffix in ("/v1/messages", "/v1/responses", "/v1/chat/completions", "/v1"):
+        if url.endswith(suffix):
+            url = url[:-len(suffix)]
+            break
+    return url.rstrip("/")
+
+
+def normalize_effort(value, provider=None):
+    """把配置里的思考强度归一；兼容老的布尔 enable_thinking。"""
+    if isinstance(value, bool):
+        value = "medium" if value else "off"
+    value = (value or "").strip().lower()
+    if value not in EFFORTS:
+        value = "medium"
+    if provider and PROVIDERS[normalize_provider(provider)]["reasoning"] == "none":
+        return "off"
+    return value
+
+
+def effort_hint(provider, effort):
+    """这一档在当前格式下实际发出去的是什么，用于界面上直说。"""
+    provider = normalize_provider(provider)
+    effort = normalize_effort(effort, provider)
+    kind = PROVIDERS[provider]["reasoning"]
+    if kind == "none":
+        return "该接口不支持思考强度"
+    if effort == "off":
+        return "不发送思考参数" if kind == "effort" else "thinking.type = disabled"
+    if kind == "anthropic":
+        return "thinking.budget_tokens = %d" % EFFORT_BUDGET[effort]
+    field = "reasoning.effort" if provider == "openai_responses" else "reasoning_effort"
+    return "%s = %s（能否用取决于模型）" % (field, effort)
+
+
+def resolve_effort(ai_config):
+    """从 ai_config 取出思考强度，优先读新键，并按 provider 收敛到可用档。"""
+    ai_config = ai_config or {}
+    provider = normalize_provider(ai_config.get("provider"))
+    raw = (ai_config.get("thinking_effort") if "thinking_effort" in ai_config
+           else ai_config.get("enable_thinking", True))
+    return normalize_effort(raw, provider)
 
 
 # ---------------------------------------------------------------- 各家实现
 
-def call_anthropic(api_key, image_path, prompt, base_url, model, enable_thinking=True):
+def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"):
     """Anthropic Messages 格式：POST /v1/messages"""
     headers = {
         "Authorization": "Bearer %s" % api_key,
@@ -191,21 +273,26 @@ def call_anthropic(api_key, image_path, prompt, base_url, model, enable_thinking
         content.append({"type": "image",
                         "source": {"type": "base64", "media_type": media_type, "data": data}})
     content.append({"type": "text", "text": prompt})
+    effort = normalize_effort(effort, "anthropic")
     body = {
-        "model": model or PROVIDERS["anthropic"]["model"],
-        # thinking 模型需要较大的输出空间，避免思考过程耗尽 token 后没有正文
+        "model": _require_model(model),
         "max_tokens": 4096,
         "messages": [{"role": "user", "content": content}],
     }
-    if not enable_thinking:
+    if effort == "off":
         body["thinking"] = {"type": "disabled"}
+    else:
+        budget = EFFORT_BUDGET[effort]
+        body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # max_tokens 必须大于思考预算，否则思考会吃光额度、正文为空
+        body["max_tokens"] = budget + 2048
 
     result = _post(_base(base_url, "anthropic") + "/v1/messages", headers, body)
     text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") != "thinking")
     return _normalize_answer(_extract_json(text).get("answer"))
 
 
-def call_openai_responses(api_key, image_path, prompt, base_url, model, enable_thinking=True):
+def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="medium"):
     """OpenAI Responses 格式：POST /v1/responses（Codex 使用）"""
     headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
     content = []
@@ -214,13 +301,15 @@ def call_openai_responses(api_key, image_path, prompt, base_url, model, enable_t
         content.append({"type": "input_image",
                         "image_url": "data:%s;base64,%s" % (media_type, data)})
     content.append({"type": "input_text", "text": prompt})
+    effort = normalize_effort(effort, "openai_responses")
     body = {
-        "model": model or PROVIDERS["openai_responses"]["model"],
+        "model": _require_model(model),
         "input": [{"role": "user", "content": content}],
-        "max_output_tokens": 4096,
+        "max_output_tokens": 8192 if effort in ("high", "xhigh") else 4096,
     }
-    # reasoning 模型用 effort 控制思考强度；不支持的模型会忽略该字段
-    body["reasoning"] = {"effort": "medium" if enable_thinking else "low"}
+    # 非推理模型不认 reasoning 字段，所以「关闭」时干脆不发
+    if effort != "off":
+        body["reasoning"] = {"effort": effort}
 
     result = _post(_base(base_url, "openai_responses") + "/v1/responses", headers, body)
     return _normalize_answer(_extract_json(_responses_text(result)).get("answer"))
@@ -244,7 +333,7 @@ def _responses_text(result):
     return "".join(parts)
 
 
-def call_openai_chat(api_key, image_path, prompt, base_url, model, enable_thinking=True):
+def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="medium"):
     """OpenAI Chat Completions 格式：POST /v1/chat/completions"""
     headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
     content = []
@@ -253,11 +342,15 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, enable_thinki
         content.append({"type": "image_url",
                         "image_url": {"url": "data:%s;base64,%s" % (media_type, data)}})
     content.append({"type": "text", "text": prompt})
+    effort = normalize_effort(effort, "openai_chat")
     body = {
-        "model": model or PROVIDERS["openai_chat"]["model"],
+        "model": _require_model(model),
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 4096,
     }
+    if effort != "off":
+        # o 系列等推理模型认这个字段，普通模型的服务端会忽略
+        body["reasoning_effort"] = effort
     result = _post(_base(base_url, "openai_chat") + "/v1/chat/completions", headers, body)
     choices = result.get("choices") or []
     if not choices:
@@ -269,7 +362,7 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, enable_thinki
     return _normalize_answer(_extract_json(text).get("answer"))
 
 
-def call_qwen(api_key, image_path, prompt, base_url=None, model=None, enable_thinking=False):
+def call_qwen(api_key, image_path, prompt, base_url=None, model=None, effort="off"):
     """阿里 dashscope 原生 SDK。"""
     try:
         from dashscope import MultiModalConversation
@@ -284,7 +377,7 @@ def call_qwen(api_key, image_path, prompt, base_url=None, model=None, enable_thi
     ]
     response = MultiModalConversation.call(
         api_key=api_key,
-        model=model or PROVIDERS["qwen"]["model"],
+        model=model or "qwen-vl-max-latest",
         messages=messages,
         response_format={"type": "json_object"},
         vl_high_resolution_images=True)
@@ -317,12 +410,11 @@ def call_ai(config, image_path, prompt=AI_PROMPT):
         raise AIError("未配置 AI API Key，请先在「设置」中填写")
     if not image_path or not os.path.exists(image_path):
         raise AIError("题目截图缺失，无法调用 AI（可尝试重新进入课程以重新下载）")
-    defaults = PROVIDERS[provider]
     return DISPATCH[provider](
         api_key, image_path, prompt,
-        base_url=ai_config.get("base_url") or defaults["base_url"],
-        model=ai_config.get("model") or defaults["model"],
-        enable_thinking=ai_config.get("enable_thinking", True))
+        base_url=ai_config.get("base_url"),
+        model=ai_config.get("model"),
+        effort=resolve_effort(ai_config))
 
 
 def review_answer(config, image_path, answers):
@@ -341,15 +433,53 @@ def review_answer(config, image_path, answers):
     return reviewed, changed
 
 
+def list_models(ai_config):
+    """GET {Base URL}/v1/models，返回模型 id 列表，供设置页下拉选择。"""
+    provider = normalize_provider(ai_config.get("provider"))
+    if provider == "qwen":
+        # dashscope 没有公开的列表接口，给出常用的多模态模型
+        return ["qwen-vl-max-latest", "qwen-vl-max", "qwen-vl-plus"]
+    api_key = (ai_config.get("api_key") or "").strip()
+    if not api_key:
+        raise AIError("请先填写 API Key")
+    url = _base(ai_config.get("base_url"), provider) + "/v1/models"
+    headers = {"Authorization": "Bearer %s" % api_key, "x-api-key": api_key,
+               "anthropic-version": "2023-06-01"}
+    try:
+        r = requests.get(url, headers=headers, timeout=30,
+                         proxies={"http": None, "https": None})
+    except requests.exceptions.RequestException as exc:
+        raise AIError("无法连接 %s：%s" % (url, exc))
+    if r.status_code in (401, 403):
+        raise AIError("API Key 无效或没有权限（HTTP %s）" % r.status_code)
+    if r.status_code == 404:
+        raise AIError("该服务不提供模型列表接口（HTTP 404），请手动填写模型名")
+    if r.status_code != 200:
+        raise AIError("获取模型列表失败（HTTP %s）：%s" % (r.status_code, r.text[:200]))
+    try:
+        payload = r.json()
+    except ValueError:
+        raise AIError("模型列表返回的不是 JSON：%s" % r.text[:200])
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise AIError("看不懂的模型列表格式：%s" % str(payload)[:200])
+    models = []
+    for item in items:
+        name = item.get("id") or item.get("name") if isinstance(item, dict) else item
+        if name:
+            models.append(str(name))
+    if not models:
+        raise AIError("服务端返回了空的模型列表")
+    return sorted(set(models))
+
+
 def test_connection(ai_config):
     """用一条极短的纯文本请求验证配置是否可用，返回提示文案。"""
     api_key = (ai_config.get("api_key") or "").strip()
     if not api_key:
         raise AIError("请先填写 API Key")
     provider = normalize_provider(ai_config.get("provider"))
-    defaults = PROVIDERS[provider]
-    model = ai_config.get("model") or defaults["model"]
-    base_url = ai_config.get("base_url") or defaults["base_url"]
+    model = _require_model(ai_config.get("model"))
 
     if provider == "qwen":
         try:
@@ -358,19 +488,20 @@ def test_connection(ai_config):
             raise AIError("未安装 dashscope，使用通义千问请先执行：pip install dashscope")
         return "dashscope 已安装，Key 将在首次答题时校验"
 
+    base = _base(ai_config.get("base_url"), provider)
     if provider == "anthropic":
-        url = _base(base_url, provider) + "/v1/messages"
+        url = base + "/v1/messages"
         headers = {"Authorization": "Bearer %s" % api_key, "x-api-key": api_key,
                    "anthropic-version": "2023-06-01", "content-type": "application/json"}
         body = {"model": model, "max_tokens": 16, "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
     elif provider == "openai_responses":
-        url = _base(base_url, provider) + "/v1/responses"
+        url = base + "/v1/responses"
         headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
         body = {"model": model, "max_output_tokens": 16,
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}
     else:
-        url = _base(base_url, provider) + "/v1/chat/completions"
+        url = base + "/v1/chat/completions"
         headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
         body = {"model": model, "max_tokens": 16,
                 "messages": [{"role": "user", "content": "hi"}]}
