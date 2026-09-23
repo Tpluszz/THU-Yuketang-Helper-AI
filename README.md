@@ -51,14 +51,17 @@ Base URL 只填到域名，路径由所选格式自动补全。**不预填任何
 
 ### 思考强度
 
-可选 关闭 / 最低 / 低 / 中 / 高 / 极高，界面上会直接显示这一档实际发出去的参数：
+可选 关闭 / 最低 / 低 / 中 / 高 / 极高 / 最高，界面上会直接显示这一档实际发出去的参数：
 
-- Anthropic 没有档位概念，映射为 `thinking.budget_tokens`（512 ~ 24576），并自动抬高 `max_tokens`
-- OpenAI 两种格式原样透传为 `reasoning.effort` / `reasoning_effort`
+- **Anthropic**：`thinking: {type: "adaptive"}` + `output_config.effort`
+  （`low`/`medium`/`high`/`xhigh`/`max`）。`budget_tokens` 已废弃——在 Opus 4.6 /
+  Sonnet 4.6 上弃用，在 Fable 5/5.1、Opus 5/4.8/4.7、Sonnet 5 上会直接返回 400，
+  所以不再使用。若网关只认旧写法，程序会自动回退一次到 `budget_tokens`。
+- **OpenAI 两种格式**：透传为 `reasoning.effort` / `reasoning_effort`
 
-各档位能否使用**取决于模型而不是接口**（例如 `xhigh` 需要 gpt-5.1-codex-max 或
-gpt-5.3-codex，普通 gpt-5.1-codex 只到 high），所以这里不做白名单限制；
-模型不支持时服务端会返回 400，程序会提示你调低一档。
+只对接口形状上不存在的档位做无损靠拢（Anthropic 无 `minimal` → `low`，OpenAI 无
+`max` → `xhigh`）。`xhigh` 能否使用**取决于模型而非接口**（需要 gpt-5.1-codex-max
+或 gpt-5.3-codex），这类不做限制，模型不支持时服务端返回 400，程序会提示你调低一档。
 
 ## 答题策略
 

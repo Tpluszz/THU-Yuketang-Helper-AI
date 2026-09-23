@@ -67,10 +67,12 @@ PROVIDERS = {
 }
 
 # 思考强度档位。
-# 注意：OpenAI 侧可用的档位是【按模型】而不是按接口变的——gpt-5.1-codex-max、
-# gpt-5.3-codex 支持 xhigh，普通 gpt-5.1-codex 只到 high。静态写死白名单必然会
-# 过时，所以这里全档位都暴露、原样透传，由服务端决定认不认；被拒时 _post 会把
-# 原因翻成人话。Anthropic 没有档位概念，用 thinking.budget_tokens 数值表达。
+# Anthropic：budget_tokens 已废弃——在 Opus 4.6/Sonnet 4.6 上弃用，在 Fable 5/5.1、
+#   Opus 5/4.8/4.7、Sonnet 5 上直接 400。现在用 thinking:{type:"adaptive"} 打开思考，
+#   深度由 output_config.effort 控制，取值 low/medium/high/xhigh/max。
+#   老网关（部分 GLM 兼容实现）只认旧的 budget_tokens，被拒时会自动回退一次。
+# OpenAI：reasoning.effort / reasoning_effort 取 minimal/low/medium/high(/xhigh)，
+#   xhigh 能否用取决于模型（gpt-5.1-codex-max、gpt-5.3-codex 支持）。
 EFFORT_LABELS = {
     "off":     "关闭",
     "minimal": "最低",
@@ -78,11 +80,15 @@ EFFORT_LABELS = {
     "medium":  "中",
     "high":    "高",
     "xhigh":   "极高",
+    "max":     "最高",
 }
 EFFORTS = tuple(EFFORT_LABELS)
-# Anthropic 各档对应的思考预算（token）
-EFFORT_BUDGET = {"minimal": 512, "low": 1024, "medium": 4096,
-                 "high": 12288, "xhigh": 24576}
+# 各家 API 形状上就不存在的档位，做一次无损靠拢（与「模型是否支持」无关）
+CLAMP_ANTHROPIC = {"minimal": "low"}                 # Anthropic effort 无 minimal
+CLAMP_OPENAI = {"max": "xhigh"}                      # OpenAI 无 max
+# 老网关回退用的思考预算
+LEGACY_BUDGET = {"minimal": 1024, "low": 2048, "medium": 8192,
+                 "high": 16384, "xhigh": 24576, "max": 32768}
 
 # 老配置里的 provider 名
 ALIASES = {"glm": "anthropic", "openai": "openai_chat", "codex": "openai_responses"}
@@ -198,6 +204,12 @@ def _post(url, headers, body, timeout=TIMEOUT):
         raise AIError("接口返回的不是 JSON：%s" % r.text[:200])
 
 
+def _looks_like_thinking_error(exc):
+    text = str(exc).lower()
+    return any(k in text for k in ("thinking", "adaptive", "budget_tokens",
+                                   "output_config", "effort"))
+
+
 def _require_model(model):
     model = (model or "").strip()
     if not model:
@@ -243,9 +255,9 @@ def effort_hint(provider, effort):
     if effort == "off":
         return "不发送思考参数" if kind == "effort" else "thinking.type = disabled"
     if kind == "anthropic":
-        return "thinking.budget_tokens = %d" % EFFORT_BUDGET[effort]
+        return "thinking=adaptive，output_config.effort = %s" % CLAMP_ANTHROPIC.get(effort, effort)
     field = "reasoning.effort" if provider == "openai_responses" else "reasoning_effort"
-    return "%s = %s（能否用取决于模型）" % (field, effort)
+    return "%s = %s" % (field, CLAMP_OPENAI.get(effort, effort))
 
 
 def resolve_effort(ai_config):
@@ -273,21 +285,32 @@ def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"
         content.append({"type": "image",
                         "source": {"type": "base64", "media_type": media_type, "data": data}})
     content.append({"type": "text", "text": prompt})
-    effort = normalize_effort(effort, "anthropic")
+    effort = CLAMP_ANTHROPIC.get(normalize_effort(effort, "anthropic"),
+                                 normalize_effort(effort, "anthropic"))
+    url = _base(base_url, "anthropic") + "/v1/messages"
     body = {
         "model": _require_model(model),
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "messages": [{"role": "user", "content": content}],
     }
     if effort == "off":
         body["thinking"] = {"type": "disabled"}
     else:
-        budget = EFFORT_BUDGET[effort]
-        body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # max_tokens 必须大于思考预算，否则思考会吃光额度、正文为空
-        body["max_tokens"] = budget + 2048
+        body["thinking"] = {"type": "adaptive"}
+        body["output_config"] = {"effort": effort}
 
-    result = _post(_base(base_url, "anthropic") + "/v1/messages", headers, body)
+    try:
+        result = _post(url, headers, body)
+    except AIError as exc:
+        # 部分老网关只认早已废弃的 budget_tokens 写法，被拒时回退一次再试
+        if effort == "off" or not _looks_like_thinking_error(exc):
+            raise
+        legacy = dict(body)
+        legacy.pop("output_config", None)
+        budget = LEGACY_BUDGET[effort]
+        legacy["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        legacy["max_tokens"] = budget + 2048     # max_tokens 必须大于思考预算
+        result = _post(url, headers, legacy)
     text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") != "thinking")
     return _normalize_answer(_extract_json(text).get("answer"))
 
@@ -302,6 +325,7 @@ def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="
                         "image_url": "data:%s;base64,%s" % (media_type, data)})
     content.append({"type": "input_text", "text": prompt})
     effort = normalize_effort(effort, "openai_responses")
+    effort = CLAMP_OPENAI.get(effort, effort)
     body = {
         "model": _require_model(model),
         "input": [{"role": "user", "content": content}],
@@ -343,6 +367,7 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="mediu
                         "image_url": {"url": "data:%s;base64,%s" % (media_type, data)}})
     content.append({"type": "text", "text": prompt})
     effort = normalize_effort(effort, "openai_chat")
+    effort = CLAMP_OPENAI.get(effort, effort)
     body = {
         "model": _require_model(model),
         "messages": [{"role": "user", "content": content}],
@@ -493,7 +518,8 @@ def test_connection(ai_config):
         url = base + "/v1/messages"
         headers = {"Authorization": "Bearer %s" % api_key, "x-api-key": api_key,
                    "anthropic-version": "2023-06-01", "content-type": "application/json"}
-        body = {"model": model, "max_tokens": 16, "thinking": {"type": "disabled"},
+        # 连通性测试不带任何 thinking 参数，避免新老网关写法差异干扰判断
+        body = {"model": model, "max_tokens": 64,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
     elif provider == "openai_responses":
         url = base + "/v1/responses"

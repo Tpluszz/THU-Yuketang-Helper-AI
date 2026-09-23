@@ -70,14 +70,22 @@ assert call_ai(cfg("openai_chat", thinking_effort="xhigh"), IMG) == ["D"]
 assert SEEN["body"]["reasoning_effort"] == "xhigh", SEEN["body"]
 print("✓ xhigh 原样透传给 Responses / Chat，不被降档")
 
-# Anthropic 用 budget_tokens 表达，且 max_tokens 必须大于预算
-assert call_ai(cfg("anthropic", thinking_effort="xhigh"), IMG) == ["B"]
-th = SEEN["body"]["thinking"]
-assert th == {"type": "enabled", "budget_tokens": 24576}, th
-assert SEEN["body"]["max_tokens"] > th["budget_tokens"], "max_tokens 必须大于思考预算"
+# Anthropic：budget_tokens 已废弃（当前模型会 400），必须发 adaptive + output_config.effort
+assert call_ai(cfg("anthropic", thinking_effort="max"), IMG) == ["B"]
+assert SEEN["body"]["thinking"] == {"type": "adaptive"}, SEEN["body"]["thinking"]
+assert SEEN["body"]["output_config"] == {"effort": "max"}, SEEN["body"].get("output_config")
+assert "budget_tokens" not in json.dumps(SEEN["body"]), "不该再出现 budget_tokens"
 assert call_ai(cfg("anthropic", thinking_effort="off"), IMG) == ["B"]
 assert SEEN["body"]["thinking"] == {"type": "disabled"}
-print("✓ anthropic：档位映射为 budget_tokens，且 max_tokens 始终大于预算")
+assert "output_config" not in SEEN["body"]
+print("✓ anthropic：thinking=adaptive + output_config.effort，不再发废弃的 budget_tokens")
+
+# 形状上不存在的档位做无损靠拢：Anthropic 无 minimal，OpenAI 无 max
+assert call_ai(cfg("anthropic", thinking_effort="minimal"), IMG) == ["B"]
+assert SEEN["body"]["output_config"] == {"effort": "low"}
+assert call_ai(cfg("openai_responses", thinking_effort="max"), IMG) == ["C"]
+assert SEEN["body"]["reasoning"]["effort"] == "xhigh"
+print("✓ 档位靠拢：anthropic 的 minimal→low，OpenAI 的 max→xhigh")
 
 # 老的布尔 enable_thinking 仍可用
 assert call_ai({"ai_config": {"provider": "openai_chat", "api_key": "k", "base_url": BASE,
