@@ -8,7 +8,7 @@ import traceback
 
 import websocket
 
-from Scripts.AI import call_ai
+from Scripts.AI import MIN_TIMEOUT as AI_MIN_TIMEOUT, call_ai
 from Scripts.Utils import (API_BASE, ANSWER_MODES, auth_headers, calculate_waittime,
                            dict_result, get_output_dir, get_user_info, http_get, http_post)
 
@@ -301,8 +301,13 @@ class Lesson:
         if not answers and mode in ("ai_confirm", "ai_auto"):
             started = time.time()
             self.add_message("%s 第%s页题目尚无答案，正在调用 AI 解答……" % (self.lessonname, page), 0)
+            # 题目还剩多少时间，就给 AI 多少时间（留 5 秒提交余量），
+            # 否则默认 120s 超时会让限时题直接错过
+            budget = None
+            if limit not in (-1, 0):
+                budget = max(AI_MIN_TIMEOUT, int(limit) - 5)
             try:
-                answers = call_ai(self.config, problem.get("image"))
+                answers = call_ai(self.config, problem.get("image"), timeout=budget)
                 problem["answers"] = answers
                 self.notify_update()
                 self.add_message("%s 第%s页 AI 给出答案：%s" % (self.lessonname, page, answers), 0)

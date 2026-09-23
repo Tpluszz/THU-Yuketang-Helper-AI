@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 
 import requests
@@ -99,7 +100,8 @@ DEFAULT_MODEL = ""
 
 RETRYABLE = (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
 MAX_RETRY = 2
-TIMEOUT = 180
+TIMEOUT = 120               # 单次请求默认超时（秒）
+MIN_TIMEOUT = 15            # 课堂上留给一次请求的最短时间
 
 
 class AIError(Exception):
@@ -168,20 +170,29 @@ def _image_data_uri(image_path):
 
 # ---------------------------------------------------------------- 传输
 
-def _post(url, headers, body, timeout=TIMEOUT):
-    """带退避重试地发一个 JSON 请求，并把常见状态码翻成人话。"""
+def _post(url, headers, body, timeout=None):
+    """带退避重试地发一个 JSON 请求，并把常见状态码翻成人话。
+
+    timeout 为 None 时取模块常量——写成默认参数会在 def 时绑死，
+    外部改 TIMEOUT 就不生效了。
+    """
+    budget = TIMEOUT if timeout is None else max(1, int(timeout))
+    deadline = time.monotonic() + budget
     last = None
+    r = None
     for attempt in range(MAX_RETRY + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            r = requests.post(url, headers=headers, json=body, timeout=timeout,
-                              proxies={"http": None, "https": None})
+            r = _post_once(url, headers, body, remaining)
             break
         except RETRYABLE as exc:
             last = exc
-            if attempt < MAX_RETRY:
-                time.sleep(1.5 * (attempt + 1))
-    else:
-        raise AIError("网络连接失败：%s" % last)
+            if attempt < MAX_RETRY and deadline - time.monotonic() > 2:
+                time.sleep(min(1.5 * (attempt + 1), max(0, deadline - time.monotonic())))
+    if r is None:
+        raise AIError("网络连接失败或超时（已用满 %ds 预算）：%s" % (budget, last or "无响应"))
 
     if r.status_code in (401, 403):
         raise AIError("API Key 无效或没有权限（HTTP %s）" % r.status_code)
@@ -197,7 +208,14 @@ def _post(url, headers, body, timeout=TIMEOUT):
                           "请在「设置 → AI 服务」里把思考强度调低一档再试。" % detail)
         raise AIError("请求被拒绝（HTTP 400）：%s" % detail)
     if r.status_code != 200:
-        raise AIError("接口返回状态码 %s：%s" % (r.status_code, r.text[:300]))
+        detail = r.text[:300]
+        low = detail.lower()
+        if "endpoint not supported" in low or "not supported" in low and "/v1/" in low:
+            other = ("OpenAI Responses" if "/v1/chat/completions" in low
+                     else "OpenAI Chat Completions")
+            raise AIError("该模型不支持当前接口格式：%s\n"
+                          "请在「设置 → AI 服务」把接口格式换成「%s」再试。" % (detail, other))
+        raise AIError("接口返回状态码 %s：%s" % (r.status_code, detail))
     try:
         return r.json()
     except ValueError:
@@ -210,12 +228,57 @@ def _looks_like_thinking_error(exc):
                                    "output_config", "effort"))
 
 
+def _cannot_disable_thinking(exc):
+    """服务端是否在说「这个模型必须思考，关不掉」。
+
+    实测 GLM 网关对 glm-5.3-flash 会返回：
+      [1210] This model always engages in thinking and cannot be disabled
+    Anthropic 侧 Fable 5/5.1 对 {"type":"disabled"} 也是直接 400。
+    """
+    text = str(exc).lower()
+    return ("cannot be disabled" in text
+            or "can not be disabled" in text
+            or ("disable" in text and "thinking" in text))
+
+
 def _require_model(model):
     model = (model or "").strip()
     if not model:
         raise AIError("请先在「设置 → AI 服务」里填写模型名称"
                       "（可点「获取模型列表」从服务端拉取）")
     return model
+
+
+def _post_once(url, headers, body, remaining):
+    """发一次请求，并强制在 remaining 秒内返回。
+
+    requests 的 timeout 只管【两次读取之间】的间隔：服务端若持续滴水般
+    回字节，它永远不触发——实测见过一次调用跑了 748 秒。所以这里再套一层
+    线程级的硬时限，到点就放弃（连接交给 GC，线程是 daemon 不挡退出）。
+    """
+    box = {}
+    done = threading.Event()
+
+    def work():
+        try:
+            box["r"] = requests.post(url, headers=headers, json=body,
+                                     timeout=remaining,
+                                     proxies={"http": None, "https": None})
+        except BaseException as exc:          # 原样带回主线程
+            box["exc"] = exc
+        finally:
+            done.set()
+
+    # 必须是 daemon 线程：被放弃的请求不能拖住程序退出。
+    # ThreadPoolExecutor 的工作线程不是 daemon，解释器退出时会等它，
+    # 表现就是「关窗口卡住不动」。
+    threading.Thread(target=work, daemon=True).start()
+    if not done.wait(remaining + 2):
+        raise requests.exceptions.Timeout(
+            "总时长超过 %.0f 秒仍未返回（服务端持续挂起）" % remaining)
+    if "exc" in box:
+        raise box["exc"]
+    return box["r"]
 
 
 def _base(base_url, provider):
@@ -271,7 +334,7 @@ def resolve_effort(ai_config):
 
 # ---------------------------------------------------------------- 各家实现
 
-def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"):
+def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium", timeout=None):
     """Anthropic Messages 格式：POST /v1/messages"""
     headers = {
         "Authorization": "Bearer %s" % api_key,
@@ -300,22 +363,37 @@ def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"
         body["output_config"] = {"effort": effort}
 
     try:
-        result = _post(url, headers, body)
+        result = _post(url, headers, body, timeout)
     except AIError as exc:
+        if effort == "off":
+            # 不少模型（GLM 的 flash 系列、Anthropic 的 Fable 5 等）压根关不掉思考。
+            # 上课时宁可用最低强度答出来，也好过因为「关闭」直接答不上。
+            if _cannot_disable_thinking(exc):
+                body = dict(body)
+                body["thinking"] = {"type": "adaptive"}
+                body["output_config"] = {"effort": "low"}
+                result = _post(url, headers, body, timeout)
+                return _normalize_answer(_extract_json(_anthropic_text(result)).get("answer"))
+            raise
         # 部分老网关只认早已废弃的 budget_tokens 写法，被拒时回退一次再试
-        if effort == "off" or not _looks_like_thinking_error(exc):
+        if not _looks_like_thinking_error(exc):
             raise
         legacy = dict(body)
         legacy.pop("output_config", None)
         budget = LEGACY_BUDGET[effort]
         legacy["thinking"] = {"type": "enabled", "budget_tokens": budget}
         legacy["max_tokens"] = budget + 2048     # max_tokens 必须大于思考预算
-        result = _post(url, headers, legacy)
-    text = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") != "thinking")
-    return _normalize_answer(_extract_json(text).get("answer"))
+        result = _post(url, headers, legacy, timeout)
+    return _normalize_answer(_extract_json(_anthropic_text(result)).get("answer"))
 
 
-def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="medium"):
+def _anthropic_text(result):
+    """取 Anthropic 响应正文，跳过 thinking 块。"""
+    return "".join(b.get("text", "") for b in result.get("content", [])
+                   if b.get("type") != "thinking")
+
+
+def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="medium", timeout=None):
     """OpenAI Responses 格式：POST /v1/responses（Codex 使用）"""
     headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
     content = []
@@ -335,7 +413,7 @@ def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="
     if effort != "off":
         body["reasoning"] = {"effort": effort}
 
-    result = _post(_base(base_url, "openai_responses") + "/v1/responses", headers, body)
+    result = _post(_base(base_url, "openai_responses") + "/v1/responses", headers, body, timeout)
     return _normalize_answer(_extract_json(_responses_text(result)).get("answer"))
 
 
@@ -357,7 +435,7 @@ def _responses_text(result):
     return "".join(parts)
 
 
-def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="medium"):
+def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="medium", timeout=None):
     """OpenAI Chat Completions 格式：POST /v1/chat/completions"""
     headers = {"Authorization": "Bearer %s" % api_key, "content-type": "application/json"}
     content = []
@@ -376,7 +454,7 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="mediu
     if effort != "off":
         # o 系列等推理模型认这个字段，普通模型的服务端会忽略
         body["reasoning_effort"] = effort
-    result = _post(_base(base_url, "openai_chat") + "/v1/chat/completions", headers, body)
+    result = _post(_base(base_url, "openai_chat") + "/v1/chat/completions", headers, body, timeout)
     choices = result.get("choices") or []
     if not choices:
         raise AIError("接口没有返回 choices：%s" % str(result)[:200])
@@ -387,7 +465,7 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="mediu
     return _normalize_answer(_extract_json(text).get("answer"))
 
 
-def call_qwen(api_key, image_path, prompt, base_url=None, model=None, effort="off"):
+def call_qwen(api_key, image_path, prompt, base_url=None, model=None, effort="off", timeout=None):
     """阿里 dashscope 原生 SDK。"""
     try:
         from dashscope import MultiModalConversation
@@ -426,8 +504,11 @@ call_glm = call_anthropic
 
 # ---------------------------------------------------------------- 入口
 
-def call_ai(config, image_path, prompt=AI_PROMPT):
-    """根据配置中的 ai_config 选择接口格式并返回 answer 列表。"""
+def call_ai(config, image_path, prompt=AI_PROMPT, timeout=None):
+    """根据配置中的 ai_config 选择接口格式并返回 answer 列表。
+
+    timeout 用于课上答题：题目只剩几十秒时，没必要等满默认超时。
+    """
     ai_config = (config or {}).get("ai_config", {})
     provider = normalize_provider(ai_config.get("provider"))
     api_key = (ai_config.get("api_key") or "").strip()
@@ -439,10 +520,11 @@ def call_ai(config, image_path, prompt=AI_PROMPT):
         api_key, image_path, prompt,
         base_url=ai_config.get("base_url"),
         model=ai_config.get("model"),
-        effort=resolve_effort(ai_config))
+        effort=resolve_effort(ai_config),
+        timeout=timeout)
 
 
-def review_answer(config, image_path, answers):
+def review_answer(config, image_path, answers, timeout=None):
     """让 AI 复核一遍候选答案。
 
     返回 (最终答案, 是否被改过)。复核只是加一道保险，
@@ -452,7 +534,7 @@ def review_answer(config, image_path, answers):
     if not original:
         return original, False
     shown = "、".join(original)
-    reviewed = call_ai(config, image_path, REVIEW_PROMPT % shown) or original
+    reviewed = call_ai(config, image_path, REVIEW_PROMPT % shown, timeout=timeout) or original
     reviewed = [str(a) for a in reviewed]
     changed = [a.strip() for a in reviewed] != [a.strip() for a in original]
     return reviewed, changed

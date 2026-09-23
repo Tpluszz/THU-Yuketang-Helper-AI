@@ -23,7 +23,7 @@ C.http_post = fake_post
 C.http_get = lambda *a, **k: Resp({"code": 0, "data": {"slides": []}})
 
 AI_CALLS = []
-C.call_ai = lambda cfg, img, prompt=None: (AI_CALLS.append(img), ["A"])[1]
+C.call_ai = lambda cfg, img, prompt=None, timeout=None: (AI_CALLS.append(timeout), ["A"])[1]
 
 MSGS = []
 class UIm:
