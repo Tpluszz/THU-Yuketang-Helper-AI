@@ -1,379 +1,410 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
-import threading
+# -*- coding: utf-8 -*-
+"""题目详情窗口：左边看截图，右边填答案。"""
 import os
-import json
+import threading
+import tkinter as tk
+from tkinter import messagebox, ttk
+
 from PIL import Image, ImageTk
-from dashscope import MultiModalConversation
+
+from Scripts.Classes import is_choice, is_multi_choice, problem_type_name
+from UI import Theme
+
 
 class ProblemDetailWindow:
-    """问题详情窗口"""
-    def __init__(self, master, problem):
-        self.window = tk.Toplevel(master)
-        self.window.title(f"问题详情 - 页码: {problem.get('page', 'N/A')}")
-        self.window.geometry("900x700")
+    """问题详情窗口。"""
+
+    def __init__(self, master, problem, lesson=None, parent_window=None):
         self.problem = problem
-        
-        # 创建UI组件
+        self.lesson = lesson
+        self.parent_window = parent_window
+        self.config = getattr(lesson, "config", None) or {}
+        self.locked = problem.get("result") is not None
+
+        self._photo = None
+        self._source_image = None
+        self._resize_job = None
+        self._area = (0, 0)      # 截图可用区域，来自容器的 Configure 事件
+        self.answer_var = tk.StringVar()
+        self.answer_vars = []
+        self.answer_entries = []
+        self.mode = "blanks"
+        self._closed = False
+
+        self.window = tk.Toplevel(master)
+        self.window.title("第 %s 页 · %s" % (problem.get("page", "?"), problem_type_name(problem)))
+        self.window.configure(bg=Theme.C["bg"])
+        Theme.apply_icon(self.window)
+        Theme.center(self.window, 1040, 700)
+        self.window.minsize(780, 520)
+
         self.create_ui()
-        
-        # 初始化AI key输入框的值
-        self.load_ai_key()
-    
-    def load_ai_key(self):
-        # 从配置中加载AI key
-        try:
-            from Scripts.Utils import get_config_path
-            config_path = get_config_path()
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    ai_key = config.get("ai_config", {}).get("api_key", "")
-                    self.ai_key_entry.delete(0, tk.END)
-                    self.ai_key_entry.insert(0, ai_key)
-        except Exception as e:
-            # 如果加载失败，使用环境变量作为备选
-            ai_key = os.getenv("API_KEY_QWEN", "")
-            self.ai_key_entry.delete(0, tk.END)
-            self.ai_key_entry.insert(0, ai_key)
-    
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.bind("<Escape>", lambda _: self.close())
+        self.window.bind("<Control-Return>", lambda _: self.on_save_click())
+        self.window.after(200, self.render_image)
+
+    # ------------------------------------------------------------ 界面
+
     def create_ui(self):
-        # 创建主框架
-        main_frame = tk.Frame(self.window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # 创建滚动区域框架
-        scroll_frame = tk.Frame(main_frame)
-        scroll_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 创建垂直滚动条
-        y_scrollbar = ttk.Scrollbar(scroll_frame)
-        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # 创建水平滚动条
-        x_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.HORIZONTAL)
-        x_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # 创建Canvas
-        self.canvas = tk.Canvas(scroll_frame, yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # 配置滚动条
-        y_scrollbar.config(command=self.canvas.yview)
-        x_scrollbar.config(command=self.canvas.xview)
-        
-        # 创建内部内容框架
-        content_frame = tk.Frame(self.canvas)
-        canvas_window = self.canvas.create_window((0, 0), window=content_frame, anchor="nw")
-        
-        # 绑定事件，确保Canvas大小适应内容
-        def on_frame_configure(event):
-            # 更新Canvas的滚动区域
-            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        
-        content_frame.bind("<Configure>", on_frame_configure)
-        
-        # 绑定鼠标滚轮事件实现垂直滚动
-        def on_mousewheel(event):
-            try:
-                self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            except tk.TclError:
-                # 忽略画布已被销毁的错误
-                pass
+        c = Theme.C
+        root = ttk.Frame(self.window)
+        root.pack(fill=tk.BOTH, expand=True, padx=16, pady=14)
 
-        self.canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        # 第一行：问题内容
-        section_frame = tk.Frame(content_frame)
-        section_frame.pack(fill=tk.X, pady=5)
-        
-        content_label = tk.Label(section_frame, text="问题内容:", font=("STHeiti", 12, "bold"))
-        content_label.pack(anchor=tk.W)
-        
-        problem_content = tk.Text(section_frame, font=("STHeiti", 10), wrap=tk.WORD, height=3)
-        problem_content.pack(fill=tk.X, expand=True, pady=5)
-        problem_content.insert(tk.END, self.problem.get('body', '无问题内容'))
-        problem_content.config(state=tk.DISABLED)
-        
-        # 第二行：问题图片
-        section_frame = tk.Frame(content_frame)
-        section_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        image_label = tk.Label(section_frame, text="问题图片:", font=("STHeiti", 12, "bold"))
-        image_label.pack(anchor=tk.W)
-        
-        # 图片容器
-        self.image_container = tk.Label(section_frame)
-        self.image_container.pack(fill=tk.BOTH, expand=True)
-        
-        # 尝试加载并显示图片
-        self.load_and_display_image()
-        
-        # 第三行：AI答题按钮和key输入
-        section_frame = tk.Frame(content_frame)
-        section_frame.pack(fill=tk.X, pady=5)
-        
-        ai_label = tk.Label(section_frame, text="AI答题:", font=("STHeiti", 12, "bold"))
-        ai_label.pack(anchor=tk.W)
-        
-        # AI key输入和按钮
-        input_frame = tk.Frame(section_frame)
-        input_frame.pack(fill=tk.X, pady=5)
-        
-        key_label = tk.Label(input_frame, text="AI Key:", font=("STHeiti", 10))
-        key_label.pack(side=tk.LEFT, padx=5)
-        
-        self.ai_key_entry = tk.Entry(input_frame, font=("STHeiti", 10), width=40, show="*")
-        self.ai_key_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        
-        self.ai_answer_btn = tk.Button(input_frame, text="AI 答题", font=("STHeiti", 10), 
-                                     command=self.on_ai_answer_click)
-        self.ai_answer_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # 第四行：根据problemType渲染答题区域
-        section_frame = tk.Frame(content_frame)
-        section_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        answer_label = tk.Label(section_frame, text="您的答案:", font=("STHeiti", 12, "bold"))
-        answer_label.pack(anchor=tk.W)
-        
-        # 根据问题类型创建不同的答题区域
-        self.answer_vars = []
-        self.answer_entries = []
-        
-        if self.problem.get('problemType') == 1:  # 单选题
-            self.create_radio_answer_area(section_frame)
-        elif self.problem.get('problemType') == 2 or self.problem.get('problemType') == 3:  # 多选题
-            self.create_check_answer_area(section_frame)
-        elif self.problem.get('blanks') or self.problem.get('problemType') == 5:  # 填空题
-            self.create_fill_answer_area(section_frame)
-        
-        # 第五行：取消/确认按钮
-        section_frame = tk.Frame(content_frame)
-        section_frame.pack(fill=tk.X, pady=20)
-        
-        self.cancel_btn = tk.Button(section_frame, text="取消", font=("STHeiti", 10), 
-                                  width=15, command=self.on_cancel_click)
-        self.cancel_btn.pack(side=tk.RIGHT, padx=10)
-        
-        self.confirm_btn = tk.Button(section_frame, text="确认", font=("STHeiti", 10), 
-                                  width=15, command=self.on_confirm_click)
-        self.confirm_btn.pack(side=tk.RIGHT, padx=10)
+        # --- 顶部信息
+        head = ttk.Frame(root)
+        head.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(head, text="第 %s 页" % self.problem.get("page", "?"),
+                  style="Section.TLabel").pack(side=tk.LEFT)
+        Theme.Badge(head, problem_type_name(self.problem), "accent").pack(side=tk.LEFT, padx=8)
+        if self.locked:
+            Theme.Badge(head, "已提交 · 不可修改", "muted").pack(side=tk.LEFT)
 
-    def on_cancel_click(self):
-        """取消按钮点击事件"""
-        # 解绑鼠标滚轮事件
+        panes = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+        panes.pack(fill=tk.BOTH, expand=True)
+        panes.add(self.build_image_pane(panes), weight=3)
+        panes.add(self.build_answer_pane(panes), weight=2)
+        # 初始把 55% 的宽度留给截图
+        panes.after(80, lambda: self._place_sash(panes, 0.55))
+
+        # --- 底部按钮
+        footer = ttk.Frame(root)
+        footer.pack(fill=tk.X, pady=(12, 0))
+        self.status_label = ttk.Label(footer, text="", style="Muted.TLabel")
+        self.status_label.pack(side=tk.LEFT)
+
+        ttk.Button(footer, text="关闭", command=self.close, width=8).pack(side=tk.RIGHT)
+        self.save_btn = ttk.Button(footer, text="保存答案", command=self.on_save_click, width=10)
+        self.save_btn.pack(side=tk.RIGHT, padx=8)
+        self.submit_btn = ttk.Button(footer, text="提交到雨课堂", style="Accent.TButton",
+                                     command=self.on_submit_click, width=14)
+        self.submit_btn.pack(side=tk.RIGHT)
+
+        if self.locked:
+            self.save_btn.state(["disabled"])
+            self.submit_btn.state(["disabled"])
+            self.set_status("该题已提交到雨课堂，答案不可再修改", "muted")
+        elif self.lesson is None:
+            self.submit_btn.state(["disabled"])
+
+    @staticmethod
+    def _place_sash(panes, fraction):
         try:
-            self.canvas.unbind_all("<MouseWheel>")
-        except:
+            width = panes.winfo_width()
+            if width > 1:
+                panes.sashpos(0, int(width * fraction))
+        except tk.TclError:
             pass
-        self.window.destroy()
 
-    def on_confirm_click(self):
-        """确认按钮点击事件"""
-        # 根据问题类型读取当前UI中的答案
-        if self.problem.get('problemType') == 1:  # 单选题
-            answer = [self.answer_var.get()]
-        elif self.problem.get('problemType') == 2 or self.problem.get('problemType') == 3:  # 多选题
-            answer = [key for key, var in self.answer_vars if var.get()]
-        elif self.problem.get('blanks') or self.problem.get('problemType') == 5:  # 填空题
-            answer = [entry.get() for entry in self.answer_entries]
-        
-        # 将答案写回到原始的problem对象
-        self.problem['answers'] = answer
-        
-        messagebox.showinfo("提示", "答案已保存")
-        
-        # 解绑鼠标滚轮事件
-        try:
-            self.canvas.unbind_all("<MouseWheel>")
-        except:
-            pass
-        self.window.destroy()
+    def build_image_pane(self, parent):
+        c = Theme.C
+        pane = ttk.Frame(parent)
+        ttk.Label(pane, text="题目截图", style="Section.TLabel").pack(anchor=tk.W, pady=(0, 6))
 
-    def _update_answer_ui(self, ai_answer):
-        # 根据问题类型更新答案UI
-        if not ai_answer:
-            messagebox.showinfo("提示", "AI未返回有效答案")
-            return
-        
-        if self.problem.get('problemType') == 1:  # 单选题
-            if ai_answer:
-                self.answer_var.set(ai_answer[0])
-        elif self.problem.get('problemType') == 2 or self.problem.get('problemType') == 3:  # 多选题
-            # 先取消所有选择
-            for key, var in self.answer_vars:
-                var.set(False)
-            
-            # 根据AI答案选择对应的选项
-            for key, var in self.answer_vars:
-                if key in ai_answer:
-                    var.set(True)
-        elif self.problem.get('blanks') or self.problem.get('problemType') == 5:  # 填空题
-            for i, entry in enumerate(self.answer_entries):
-                if i < len(ai_answer):
-                    entry.delete(0, tk.END)
-                    entry.insert(0, ai_answer[i])
-        
-        messagebox.showinfo("提示", "AI答题完成，请点击确认保存答案")
+        wrap = Theme.card(pane)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=(0, 8))
+        self.image_container = tk.Label(wrap, bg=c["surface"], fg=c["faint"],
+                                        font=Theme.font(11), text="正在加载截图……")
+        self.image_container.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        wrap.bind("<Configure>", self.on_image_area_resize)
+        self.load_image()
+        return pane
 
-    def load_and_display_image(self):
-        # 尝试加载并显示图片
-        image_path = self.problem.get('image', '')
-        if image_path and os.path.exists(image_path):
-            try:
-                # 打开图片
-                image = Image.open(image_path)
-                # 调整图片大小以适应窗口
-                max_width = 800
-                max_height = 400
-                width, height = image.size
-                ratio = min(max_width/width, max_height/height)
-                new_width = int(width * ratio)
-                new_height = int(height * ratio)
-                image = image.resize((new_width, new_height), Image.LANCZOS)
-                
-                # 转换为tkinter可用的图片
-                photo = ImageTk.PhotoImage(image)
-                
-                # 保存引用，防止被垃圾回收
-                self.image_photo = photo
-                
-                # 显示图片
-                self.image_container.config(image=photo)
-            except Exception as e:
-                self.image_container.config(text=f"图片加载失败: {str(e)}")
+    def build_answer_pane(self, parent):
+        c = Theme.C
+        pane = ttk.Frame(parent)
+
+        ttk.Label(pane, text="题干", style="Section.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        body_wrap = Theme.card(pane)
+        body_wrap.pack(fill=tk.X)
+        body = tk.Text(body_wrap, wrap=tk.WORD, height=3, bd=0, highlightthickness=0,
+                       font=Theme.font(10), bg=c["surface"], fg=c["text"], padx=10, pady=8)
+        body.insert(tk.END, (self.problem.get("body") or "（此题没有文字题干，请看左侧截图）").strip())
+        body.config(state=tk.DISABLED)
+        body.pack(fill=tk.X, padx=1, pady=1)
+
+        ai_row = ttk.Frame(pane)
+        ai_row.pack(fill=tk.X, pady=(12, 6))
+        ttk.Label(ai_row, text="您的答案", style="Section.TLabel").pack(side=tk.LEFT)
+        self.ai_btn = ttk.Button(ai_row, text="✨  让 AI 作答", command=self.on_ai_answer_click)
+        self.ai_btn.pack(side=tk.RIGHT)
+        if self.locked:
+            self.ai_btn.state(["disabled"])
+
+        answer_wrap = Theme.card(pane)
+        answer_wrap.pack(fill=tk.BOTH, expand=True)
+        outer, self.answer_frame = Theme.scrollable(answer_wrap)
+        outer.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        self.build_answer_widgets(self.answer_frame)
+        return pane
+
+    def build_answer_widgets(self, parent):
+        """按题型渲染答题控件。"""
+        options = self.problem.get("options") or []
+        answers = self.problem.get("answers") or []
+        if isinstance(answers, dict):
+            answers = [answers.get("content", "")]
+        state = tk.DISABLED if self.locked else tk.NORMAL
+
+        # 记下实际渲染的答题模式，读写答案时按它来，避免和题型判断脱节
+        if is_multi_choice(self.problem):
+            self.mode = "multi"
+        elif is_choice(self.problem):
+            self.mode = "single"
+        elif self.problem.get("problemType") == 5 and not self.problem.get("blanks"):
+            self.mode = "text"
         else:
-            self.image_container.config(text="无图片")
-    
-    def create_radio_answer_area(self, parent):
-        # 创建单选题答题区域
-        options = self.problem.get('options', [])
-        default_answer = self.problem.get('answers', [])[0] if self.problem.get('answers') else ''
-        
-        self.answer_var = tk.StringVar(value=default_answer)
-        
-        for option in options:
-            key = option.get('key', '')
-            value = option.get('value', '')
-            
-            frame = tk.Frame(parent)
-            frame.pack(fill=tk.X, padx=10, pady=2)
-            
-            radio = tk.Radiobutton(frame, text=f"{key}: {value}", variable=self.answer_var, value=key, 
-                                 font=("STHeiti", 10), anchor=tk.W)
-            radio.pack(fill=tk.X, padx=10)
-    
-    def create_check_answer_area(self, parent):
-        # 创建多选题答题区域
-        options = self.problem.get('options', [])
-        default_answers = self.problem.get('answers', [])
-        
-        self.answer_vars = []
-        
-        for option in options:
-            key = option.get('key', '')
-            value = option.get('value', '')
-            
-            var = tk.BooleanVar(value=key in default_answers)
-            self.answer_vars.append((key, var))
-            
-            frame = tk.Frame(parent)
-            frame.pack(fill=tk.X, padx=10, pady=2)
-            
-            check = tk.Checkbutton(frame, text=f"{key}: {value}", variable=var, 
-                                 font=("STHeiti", 10), anchor=tk.W)
-            check.pack(fill=tk.X, padx=10)
-    
-    def create_fill_answer_area(self, parent):
-        # 创建填空题答题区域
-        blanks_count = len(self.problem.get('blanks', [""]))
-        default_answers = self.problem.get('answers', [])
-        
-        self.answer_entries = []
-        
-        for i in range(blanks_count):
-            frame = tk.Frame(parent)
-            frame.pack(fill=tk.X, padx=10, pady=2)
-            
-            label = tk.Label(frame, text=f"填空{i+1}: ", font=("STHeiti", 10), width=10, anchor=tk.W)
-            label.pack(side=tk.LEFT, padx=5)
-            
-            entry = tk.Entry(frame, font=("STHeiti", 10))
-            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-            
-            # 设置默认值
-            if i < len(default_answers):
-                entry.delete(0, tk.END)
-                entry.insert(0, default_answers[i])
-            
-            self.answer_entries.append(entry)
-    
-    def on_ai_answer_click(self):
-        # AI答题按钮点击事件
-        # 获取AI key
-        ai_key = self.ai_key_entry.get()
-        if not ai_key:
-            # 如果没有输入key，显示一个提示
-            messagebox.showwarning("提示", "请输入AI Key")
+            self.mode = "blanks"
+        self._closed = False
+
+        if self.mode == "multi":
+            for option in options:
+                key = option.get("key", "")
+                var = tk.BooleanVar(value=key in answers)
+                self.answer_vars.append((key, var))
+                ttk.Checkbutton(parent, text="%s.  %s" % (key, option.get("value", "")),
+                                variable=var, state=state).pack(fill=tk.X, padx=12, pady=4)
+
+        elif self.mode == "single":
+            self.answer_var.set(answers[0] if answers else "")
+            for option in options:
+                key = option.get("key", "")
+                ttk.Radiobutton(parent, text="%s.  %s" % (key, option.get("value", "")),
+                                variable=self.answer_var, value=key,
+                                state=state).pack(fill=tk.X, padx=12, pady=4)
+
+        elif self.mode == "text":
+            ttk.Label(parent, text="主观题作答：", style="Muted.TLabel").pack(anchor=tk.W, padx=12, pady=(10, 4))
+            text = tk.Text(parent, height=8, wrap=tk.WORD, bd=1, relief="solid",
+                           font=Theme.font(10), bg=Theme.C["surface"], fg=Theme.C["text"],
+                           highlightthickness=0, padx=8, pady=6)
+            text.insert(tk.END, answers[0] if answers else "")
+            if self.locked:
+                text.config(state=tk.DISABLED)
+            text.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+            self.subjective_text = text
+
+        else:
+            blanks = self.problem.get("blanks") or [""]
+            for i in range(len(blanks)):
+                row = ttk.Frame(parent)
+                row.pack(fill=tk.X, padx=12, pady=5)
+                ttk.Label(row, text="填空 %d" % (i + 1), width=8).pack(side=tk.LEFT)
+                entry = ttk.Entry(row, state=state)
+                entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                if i < len(answers):
+                    entry.insert(0, str(answers[i]))
+                self.answer_entries.append(entry)
+
+    # ------------------------------------------------------------ 图片
+
+    def load_image(self):
+        path = self.problem.get("image", "")
+        if not path or not os.path.exists(path):
+            self.image_container.config(text="没有找到题目截图", image="")
             return
-        
-        # 模拟AI思考过程
-        self.ai_answer_btn.config(state=tk.DISABLED, text="AI 思考中...")
-        self.window.update()
-        
-        # 启动一个线程来调用AI接口，避免阻塞UI
-        ai_thread = threading.Thread(target=self._call_ai_api, args=(ai_key,))
-        ai_thread.daemon = True
-        ai_thread.start()
-    
-    def _call_ai_api(self, ai_key):
         try:
-            # 这里应该实现真正的AI API调用逻辑
-            # 参考Classes.py中的get_problems方法
-            image_path = self.problem.get('image', '')
-            
-            if image_path and os.path.exists(image_path):
-                # 构建消息
-                messages = [
-                    {"role": "system", "content": [{"text": "You are a helpful assistant."}]},
-                    {
-                        'role':'user',
-                        'content': [
-                            {'image': f"file://{os.path.abspath(image_path)}"},
-                            {'text': '请以JSON格式回答图片中的问题。如果是选择题，则返回{{"question": "问题", "answer": ["选项（A/B/C/...）"]}}，选项为圆形则为单选，选项为矩形则为多选；如果是填空题，则返回{{"question": "问题", "answer": ["填空1答案", "填空2答案", ...]}}；如果是主观题，则返回{{"question": "问题", "answer": ["主观题答案"]}}'}
-                        ]
-                    }
-                ]
-                
-                # 实际的API调用
-                response = MultiModalConversation.call(
-                    api_key=ai_key,
-                    model='qwen-vl-max-latest',
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    vl_high_resolution_images=True)
-                
-                # 解析API返回结果
-                json_output = response["output"]["choices"][0]["message"].content[0]["text"]
-                res = json.loads(json_output)
-                
-                # 获取答案
-                ai_answer = res.get('answer', [])
-                
-                # 在主线程中更新UI
-                self.window.after(0, self._update_answer_ui, ai_answer)
+            self._source_image = Image.open(path)
+            self._source_image.load()
+        except Exception as exc:
+            self.image_container.config(text="截图加载失败：%s" % exc, image="")
+            return
+        self.window.after(60, self.render_image)
+
+    def on_image_area_resize(self, event=None):
+        """窗口尺寸变化时按比例重绘图片（做个防抖，避免拖动时反复缩放）。
+
+        尺寸直接取事件里的宽高——此时内部 Label 还没完成布局，
+        winfo_width() 拿到的会是上一轮的旧值。
+        """
+        if event is not None:
+            self._area = (event.width, event.height)
+        if self._source_image is None:
+            return
+        if self._resize_job:
+            self.window.after_cancel(self._resize_job)
+        self._resize_job = self.window.after(120, self.render_image)
+
+    def render_image(self):
+        self._resize_job = None
+        if self._source_image is None or not self.alive():
+            return
+        area_w, area_h = self._area
+        if area_w <= 1 or area_h <= 1:
+            area_w = self.image_container.winfo_width()
+            area_h = self.image_container.winfo_height()
+        avail_w = max(120, area_w - 18)
+        avail_h = max(120, area_h - 18)
+        width, height = self._source_image.size
+        ratio = min(avail_w / width, avail_h / height, 2.0)
+        size = (max(1, int(width * ratio)), max(1, int(height * ratio)))
+        if self._photo is not None and size == getattr(self, "_photo_size", None):
+            return          # 尺寸没变就不重复缩放
+        self._photo_size = size
+        resized = self._source_image.resize(size, Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(resized)
+        self.image_container.config(image=self._photo, text="")
+
+    # ------------------------------------------------------------ 答案读写
+
+    def collect_answers(self):
+        """从界面控件读出当前答案。"""
+        if self.mode == "multi":
+            return [key for key, var in self.answer_vars if var.get()]
+        if self.mode == "single":
+            value = self.answer_var.get()
+            return [value] if value else []
+        if self.mode == "text":
+            content = self.subjective_text.get("1.0", tk.END).strip()
+            return [content] if content else []
+        return [entry.get().strip() for entry in self.answer_entries if entry.get().strip()]
+
+    def apply_answers(self, answers):
+        """把答案写回界面控件。"""
+        if self.mode == "multi":
+            for key, var in self.answer_vars:
+                var.set(key in answers)
+        elif self.mode == "single":
+            if answers:
+                self.answer_var.set(answers[0])
+        elif self.mode == "text":
+            self.subjective_text.delete("1.0", tk.END)
+            if answers:
+                self.subjective_text.insert(tk.END, str(answers[0]))
+        else:
+            for i, entry in enumerate(self.answer_entries):
+                entry.delete(0, tk.END)
+                if i < len(answers):
+                    entry.insert(0, str(answers[i]))
+
+    def set_status(self, text, tone="muted"):
+        colors = {"muted": Theme.C["muted"], "success": Theme.C["success"],
+                  "error": Theme.C["danger"], "warning": Theme.C["warning"]}
+        self.status_label.config(text=text, foreground=colors.get(tone, Theme.C["muted"]))
+
+    # ------------------------------------------------------------ 动作
+
+    def on_save_click(self):
+        if self.locked:
+            return
+        answers = self.collect_answers()
+        if not answers:
+            self.set_status("还没有填写答案", "warning")
+            return
+        self.problem["answers"] = answers
+        if self.lesson:
+            self.lesson.notify_update()
+        elif self.parent_window:
+            self.parent_window.refresh()
+        self.set_status("答案已保存到本地，课上推送该题时会自动提交", "success")
+
+    def on_submit_click(self):
+        if self.locked or self.lesson is None:
+            return
+        answers = self.collect_answers()
+        if not answers:
+            self.set_status("还没有填写答案", "warning")
+            return
+        if not messagebox.askokcancel("确认提交",
+                                      "确定把答案 %s 提交到雨课堂吗？\n提交后不可修改。" % "、".join(map(str, answers))):
+            return
+        self.problem["answers"] = answers
+        self.submit_btn.state(["disabled"])
+        self.set_status("正在提交……")
+
+        def work():
+            try:
+                self.lesson.submit_problem(self.problem)
+            except Exception as exc:
+                self._ui(lambda: self._submit_failed(exc))
             else:
-                # 没有图片的情况，只使用文本问题
-                # 这里可以实现纯文本的API调用
-                messagebox.showinfo("提示", "该问题没有图片，无法使用AI答题功能")
-                
-        except json.JSONDecodeError as e:
-            # JSON解析错误处理
-            self.window.after(0, lambda: messagebox.showerror("错误", f"AI返回结果解析失败: {str(e)}"))
-        except Exception as e:
-            # 其他错误处理
-            self.window.after(0, lambda: messagebox.showerror("错误", f"AI答题失败: {str(e)}"))
+                self._ui(self._submit_ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _submit_ok(self):
+        self.locked = True
+        self.set_status("提交成功，本题已锁定", "success")
+        for widget in (self.save_btn, self.ai_btn):
+            widget.state(["disabled"])
+        if self.parent_window:
+            self.parent_window.refresh()
+
+    def _submit_failed(self, exc):
+        self.submit_btn.state(["!disabled"])
+        self.set_status("提交失败：%s" % exc, "error")
+
+    def on_ai_answer_click(self):
+        if self.locked:
+            return
+        key = (self.config.get("ai_config", {}).get("api_key") or "").strip()
+        if not key:
+            messagebox.showwarning("尚未配置 API Key",
+                                   "请先回到主界面点击「设置」，填写 AI API Key 后再使用 AI 答题。")
+            return
+        image_path = self.problem.get("image", "")
+        if not image_path or not os.path.exists(image_path):
+            self.set_status("没有题目截图，无法使用 AI 答题", "warning")
+            return
+
+        self.ai_btn.state(["disabled"])
+        self.set_status("AI 正在思考……")
+        threading.Thread(target=self._call_ai_api, daemon=True).start()
+
+    def _call_ai_api(self):
+        from Scripts.AI import call_ai
+        try:
+            answers = call_ai(self.config, self.problem.get("image"))
+        except Exception as exc:
+            self._ui(lambda: self.set_status("AI 答题失败：%s" % exc, "error"))
+        else:
+            self._ui(lambda: self._on_ai_answer(answers))
         finally:
-            # 在主线程中恢复按钮状态
-            self.window.after(0, lambda: self.ai_answer_btn.config(state=tk.NORMAL, text="AI 答题"))
+            self._ui(lambda: self.ai_btn.state(["!disabled"]))
+
+    def _on_ai_answer(self, answers):
+        if not answers:
+            self.set_status("AI 未返回有效答案，可重试或手动作答", "warning")
+            return
+        self.apply_answers(answers)
+        self.problem["answers"] = answers
+        if self.lesson:
+            self.lesson.notify_update()
+        self.set_status("AI 答案：%s —— 请核对后点击「保存答案」或「提交到雨课堂」"
+                        % "、".join(map(str, answers)), "success")
+
+    # ------------------------------------------------------------ 杂项
+
+    def _ui(self, func):
+        """把回调丢回主线程执行。
+
+        注意：这里不能调用 winfo_exists() 之类的 Tcl 接口——子线程碰 Tcl
+        会抛 RuntimeError，之前被 except 吞掉，导致进度和完成回调全部丢失。
+        """
+        if self._closed:
+            return
+        try:
+            self.window.after(0, func)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def alive(self):
+        """窗口是否还在。_closed 是纯 Python 标志，子线程里判断它不碰 Tcl。"""
+        if self._closed:
+            return False
+        try:
+            return bool(self.window.winfo_exists())
+        except (tk.TclError, RuntimeError):
+            return False
+
+    def focus(self):
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_force()
+
+    def close(self):
+        self._closed = True
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass

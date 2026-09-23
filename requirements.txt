@@ -1,4 +1,6 @@
-pillow==10.4.0
-requests==2.27.1
-websocket-client==1.4.0
-dashscope==1.24.6
+pillow>=10.4.0
+requests>=2.27.1
+websocket-client>=1.4.0
+
+# 仅在「AI 服务」选择通义千问 Qwen 时才需要，用 GLM 可以不装
+dashscope>=1.24.6

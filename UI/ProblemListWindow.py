@@ -1,243 +1,309 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+# -*- coding: utf-8 -*-
+"""题目列表窗口：总览一门课的所有题目，并可批量交给 AI 解答。"""
 import threading
-import os
-import json
-from dashscope import MultiModalConversation
+import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
+from tkinter import messagebox, ttk
+
+from Scripts.Classes import format_answer, problem_type_name
+from UI import Theme
 from UI.ProblemDetailWindow import ProblemDetailWindow
 
+
 class ProblemListWindow:
-    """显示课程题目列表的窗口"""
-    def __init__(self, master, lesson_name, problems_ls):
+    """显示课程题目列表的窗口。"""
+
+    def __init__(self, master, lesson, main_ui=None):
+        self.lesson = lesson
+        self.main_ui = main_ui
+        self.config = getattr(main_ui, "config", None) or lesson.config
+        self.detail_windows = {}
+        self.solving = False
+        self._closed = False
+        self.cancel_flag = threading.Event()
+
         self.window = tk.Toplevel(master)
-        self.window.title(f"{lesson_name} - 题目列表")
-        self.window.geometry("800x600")
-        self.problems_ls = problems_ls
-        
-        # 保存答案的字典
-        self.solved_problems = {}
-        
-        # 创建题目列表
-        self.create_problem_list()
-        
-        # 初始化AI key输入框的值
-        self.load_ai_key()
-    
-    def create_problem_list(self):
-        # 创建主框架
-        main_frame = tk.Frame(self.window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # 创建标题
-        title_label = tk.Label(main_frame, text="题目列表", font=("STHeiti", 12))
-        title_label.pack(anchor=tk.W, pady=5)
-        
-        # 添加AI解答所有题目功能
-        ai_frame = tk.Frame(main_frame)
-        ai_frame.pack(fill=tk.X, pady=5)
-        
-        key_label = tk.Label(ai_frame, text="API Key:", font=("STHeiti", 10))
-        key_label.pack(side=tk.LEFT, padx=5)
-        
-        self.ai_key_entry = tk.Entry(ai_frame, font=("STHeiti", 10), width=40, show="*")
-        self.ai_key_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        
-        self.solve_all_btn = tk.Button(ai_frame, text="AI 解答所有题目", font=("STHeiti", 10), 
-                                     command=self.on_solve_all_click)
-        self.solve_all_btn.pack(side=tk.RIGHT, padx=5)
-        
-        # 创建滚动区域框架
-        scroll_frame = tk.Frame(main_frame)
-        scroll_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 创建垂直滚动条
-        y_scrollbar = ttk.Scrollbar(scroll_frame)
-        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # 创建水平滚动条
-        x_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.HORIZONTAL)
-        x_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # 创建Canvas
-        canvas = tk.Canvas(scroll_frame, yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # 配置滚动条
-        y_scrollbar.config(command=canvas.yview)
-        x_scrollbar.config(command=canvas.xview)
-        
-        # 创建内部框架
-        inner_frame = tk.Frame(canvas)
-        canvas_window = canvas.create_window((0, 0), window=inner_frame, anchor="nw")
-        
-        # 绑定事件，确保Canvas大小适应内容
-        def on_frame_configure(event):
-            # 更新Canvas的滚动区域
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        
-        inner_frame.bind("<Configure>", on_frame_configure)
-        
-        # 绑定鼠标滚轮事件实现垂直滚动
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        # 添加题目项
-        for idx, problem in enumerate(self.problems_ls):
-            # 创建问题项
-            problem_frame = tk.Frame(inner_frame, bd=1, relief=tk.RAISED)
-            problem_frame.pack(fill=tk.X, pady=5, padx=5)
-            
-            # 检查问题是否有result键且非空
-            has_result = 'result' in problem and problem['result']
-            
-            if has_result:
-                # 有结果，锁住题目，设置为灰色背景
-                problem_frame.config(bg="#E0E0E0", cursor="arrow")
-                # 页码
-                page_label = tk.Label(problem_frame, text=f"页码: {problem.get('page', 'N/A')} (已解答)", 
-                                    font=("STHeiti", 10), width=20, anchor=tk.W, cursor="arrow", bg="#E0E0E0")
-                page_label.pack(side=tk.LEFT, padx=5, pady=5)
-                # 问题内容
-                content_label = tk.Label(problem_frame, text=f"{problem.get('body', '无问题内容')}", 
-                                       font=("STHeiti", 10), wraplength=600, justify=tk.LEFT, cursor="arrow", bg="#E0E0E0")
-                content_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-            else:
-                # 没有结果，可点击
-                problem_frame.bind("<Button-1>", lambda e, p=problem: self.on_problem_click(p))
-                problem_frame.config(cursor="hand2")
-                # 页码
-                page_label = tk.Label(problem_frame, text=f"页码: {problem.get('page', 'N/A')}", 
-                                    font=("STHeiti", 10), width=15, anchor=tk.W, cursor="hand2")
-                page_label.pack(side=tk.LEFT, padx=5, pady=5)
-                page_label.bind("<Button-1>", lambda e, p=problem: self.on_problem_click(p))
-                # 问题内容
-                content_label = tk.Label(problem_frame, text=f"{problem.get('body', '无问题内容')}", 
-                                       font=("STHeiti", 10), wraplength=600, justify=tk.LEFT, cursor="hand2")
-                content_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-                content_label.bind("<Button-1>", lambda e, p=problem: self.on_problem_click(p))
-    
-    def load_ai_key(self):
-        # 从配置中加载AI key
-        try:
-            from Scripts.Utils import get_config_path
-            config_path = get_config_path()
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    ai_key = config.get("ai_config", {}).get("api_key", "")
-                    self.ai_key_entry.delete(0, tk.END)
-                    self.ai_key_entry.insert(0, ai_key)
-        except Exception as e:
-            # 如果加载失败，使用环境变量作为备选
-            ai_key = os.getenv("API_KEY_QWEN", "")
-            self.ai_key_entry.delete(0, tk.END)
-            self.ai_key_entry.insert(0, ai_key)
-    
-    def on_problem_click(self, problem):
-        """题目点击事件处理"""
-        # 如果题目已经被解答，恢复答案
-        if problem.get('page') in self.solved_problems:
-            problem['answers'] = self.solved_problems[problem.get('page')]
-        
-        # 创建并显示问题详情窗口
-        self.problem_detail_window = ProblemDetailWindow(self.window, problem)
-    
-    def on_solve_all_click(self):
-        # AI解答所有题目按钮点击事件
-        # 获取AI key
-        ai_key = self.ai_key_entry.get()
-        if not ai_key:
-            # 如果没有输入key，显示一个提示
-            messagebox.showwarning("提示", "请输入API Key")
+        self.window.title("%s - 题目列表" % lesson.lessonname)
+        self.window.configure(bg=Theme.C["bg"])
+        Theme.apply_icon(self.window)
+        Theme.center(self.window, 940, 660)
+        self.window.minsize(760, 480)
+
+        self.create_ui()
+        self.refresh()
+
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.bind("<Escape>", lambda _: self.close())
+        self.window.bind("<F5>", lambda _: self.refresh())
+
+    # ------------------------------------------------------------ 界面
+
+    def create_ui(self):
+        c = Theme.C
+        root = ttk.Frame(self.window)
+        root.pack(fill=tk.BOTH, expand=True, padx=16, pady=14)
+
+        # --- 顶部：标题 + 统计
+        head = ttk.Frame(root)
+        head.pack(fill=tk.X)
+        ttk.Label(head, text=self.lesson.lessonname, style="Section.TLabel").pack(side=tk.LEFT)
+        self.count_badge = Theme.Badge(head, "0 题", "accent")
+        self.count_badge.pack(side=tk.LEFT, padx=10)
+        self.done_badge = Theme.Badge(head, "已提交 0", "success")
+        self.done_badge.pack(side=tk.LEFT)
+
+        ttk.Label(root, text="双击题目可查看大图、修改答案或单独让 AI 作答；已提交的题目会被锁定。",
+                  style="Muted.TLabel").pack(anchor=tk.W, pady=(4, 12))
+
+        # --- 工具栏
+        bar = ttk.Frame(root)
+        bar.pack(fill=tk.X, pady=(0, 10))
+        self.solve_all_btn = ttk.Button(bar, text="✨  AI 解答全部未答题", style="Accent.TButton",
+                                        command=self.on_solve_all_click)
+        self.solve_all_btn.pack(side=tk.LEFT)
+        self.cancel_btn = ttk.Button(bar, text="停止", command=self.on_cancel_click, width=8)
+        self.detail_btn = ttk.Button(bar, text="查看选中题目", command=self.open_selected, width=14)
+        self.detail_btn.pack(side=tk.LEFT, padx=8)
+        ttk.Button(bar, text="刷新", command=self.refresh, width=8).pack(side=tk.LEFT)
+        self.progress_label = ttk.Label(bar, text="", style="Muted.TLabel")
+        self.progress_label.pack(side=tk.RIGHT)
+
+        self.progress = ttk.Progressbar(root, mode="determinate")
+
+        # --- 表格
+        wrap = Theme.card(root)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("page", "type", "body", "answer", "state")
+        self.tree = ttk.Treeview(wrap, columns=columns, show="headings", selectmode="browse")
+        for key, text, width, anchor, stretch in (
+                ("page", "页码", 70, tk.CENTER, False),
+                ("type", "题型", 90, tk.CENTER, False),
+                ("body", "题干", 380, tk.W, True),
+                ("answer", "当前答案", 200, tk.W, False),
+                ("state", "状态", 100, tk.CENTER, False)):
+            self.tree.heading(key, text=text, anchor=anchor)
+            self.tree.column(key, width=width, anchor=anchor, stretch=stretch)
+
+        scrollbar = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=1, padx=(0, 1))
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        self.tree.tag_configure("odd", background=c["surface_alt"])
+        self.tree.tag_configure("locked", foreground=c["faint"])
+        self.tree.tag_configure("ready", foreground=c["success"])
+        self.tree.tag_configure("pending", foreground=c["text"])
+
+        self.tree.bind("<Double-Button-1>", lambda _: self.open_selected())
+        self.tree.bind("<Return>", lambda _: self.open_selected())
+
+        self.empty_hint = tk.Label(wrap, text="这门课还没有加载到题目\n老师放出课件后会自动出现",
+                                   font=Theme.font(11), fg=c["faint"], bg=c["surface"],
+                                   justify=tk.CENTER)
+
+    # ------------------------------------------------------------ 数据刷新
+
+    def refresh(self):
+        """按当前题目数据重建表格。"""
+        if not self.alive():
             return
-        
-        # 模拟AI思考过程
-        self.solve_all_btn.config(state=tk.DISABLED, text="AI 解答中...")
-        self.window.update()
-        
-        # 启动一个线程来调用AI接口，避免阻塞UI
-        ai_thread = threading.Thread(target=self._solve_all_problems, args=(ai_key,))
-        ai_thread.daemon = True
-        ai_thread.start()
-    
-    def _solve_all_problems(self, ai_key):
-        try:
-            solved_count = 0
-            total_count = len(self.problems_ls)
-            
-            # 依次处理每个问题，跳过已有result的问题
-            for idx, problem in enumerate(self.problems_ls):
-                # 检查问题是否已有result键且非空，如果有则跳过
-                if 'result' in problem and problem['result']:
-                    continue
-                    
-                try:
-                    # 更新按钮文本显示进度
-                    progress_text = f"AI 解答中... ({idx+1}/{total_count})"
-                    self.window.after(0, lambda text=progress_text: 
-                                     self.solve_all_btn.config(text=text))
-                    
-                    # 调用AI接口解答当前问题
-                    ai_answer = self._call_ai_api_for_problem(ai_key, problem)
-                    
-                    if ai_answer:
-                        # 保存答案
-                        problem['answers'] = ai_answer
-                        self.solved_problems[problem.get('page')] = ai_answer
-                        solved_count += 1
-                    
-                except Exception as e:
-                    # 单个问题处理失败，继续处理下一个
-                    print(f"处理题目{problem.get('page')}时出错: {str(e)}")
-                    continue
-            
-            # 全部处理完毕后显示结果
-            self.window.after(0, lambda: messagebox.showinfo("提示", 
-                             f"AI解答完成！共处理{total_count}个题目，成功解答{solved_count}个题目"))
-            
-        except Exception as e:
-            # 处理整体错误
-            self.window.after(0, lambda: messagebox.showerror("错误", 
-                             f"AI批量解答失败: {str(e)}"))
-        finally:
-            # 恢复按钮状态
-            self.window.after(0, lambda: self.solve_all_btn.config(
-                             state=tk.NORMAL, text="AI 解答所有题目"))
-    
-    def _call_ai_api_for_problem(self, ai_key, problem):
-        # 调用AI API解答单个问题
-        image_path = problem.get('image', '')
-        
-        if image_path and os.path.exists(image_path):
-            # 构建消息
-            messages = [
-                {"role": "system", "content": [{"text": "You are a helpful assistant."}]},
-                {
-                    'role':'user',
-                    'content': [
-                        {'image': f"file://{os.path.abspath(image_path)}"},
-                        {'text': '请以JSON格式回答图片中的问题。如果是选择题，则返回{{"question": "问题", "answer": ["选项（A/B/C/...）"]}}，选项为圆形则为单选，选项为矩形则为多选；如果是填空题，则返回{{"question": "问题", "answer": ["填空1答案", "填空2答案", ...]}}；如果是主观题，则返回{{"question": "问题", "answer": ["主观题答案"]}}'}
-                    ]
-                }
-            ]
-            
-            # 实际的API调用
-            response = MultiModalConversation.call(
-                api_key=ai_key,
-                model='qwen-vl-max-latest',
-                messages=messages,
-                response_format={"type": "json_object"},
-                vl_high_resolution_images=True)
-            
-            # 解析API返回结果
-            json_output = response["output"]["choices"][0]["message"].content[0]["text"]
-            res = json.loads(json_output)
-            
-            # 获取答案
-            ai_answer = res.get('answer', [])
-            return ai_answer
+        problems = self.lesson.snapshot_problems()
+        self.problems = problems
+
+        selected = self.tree.selection()
+        self.tree.delete(*self.tree.get_children())
+
+        for idx, problem in enumerate(problems):
+            locked = problem.get("result") is not None
+            answer = format_answer(problem)
+            if locked:
+                state, tag = "已提交", "locked"
+            elif answer:
+                state, tag = "待提交", "ready"
+            else:
+                state, tag = "未作答", "pending"
+            body = (problem.get("body") or "（无题干文字，见截图）").replace("\n", " ").strip()
+            tags = [tag] + (["odd"] if idx % 2 else [])
+            self.tree.insert("", "end", iid=str(idx), tags=tuple(tags),
+                             values=(problem.get("page", "?"), problem_type_name(problem),
+                                     body, answer or "—", state))
+
+        for iid in selected:
+            if self.tree.exists(iid):
+                self.tree.selection_set(iid)
+
+        total = len(problems)
+        done = sum(1 for p in problems if p.get("result") is not None)
+        pending = sum(1 for p in problems if p.get("result") is None and not (p.get("answers") or []))
+        self.count_badge.set("%d 题" % total, "accent")
+        self.done_badge.set("已提交 %d · 待解答 %d" % (done, pending),
+                            "success" if pending == 0 else "warning")
+        self.solve_all_btn.state(["disabled"] if (pending == 0 or self.solving) else ["!disabled"])
+
+        if total:
+            self.empty_hint.place_forget()
         else:
-            # 没有图片的情况，不进行处理
+            self.empty_hint.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
+
+        for key, window in list(self.detail_windows.items()):
+            if not window.alive():
+                self.detail_windows.pop(key, None)
+
+    # ------------------------------------------------------------ 交互
+
+    def selected_problem(self):
+        selection = self.tree.selection()
+        if not selection:
             return None
+        idx = int(selection[0])
+        return self.problems[idx] if idx < len(self.problems) else None
+
+    def open_selected(self):
+        problem = self.selected_problem()
+        if problem is None:
+            messagebox.showinfo("提示", "请先在列表中选择一道题目")
+            return
+        key = str(problem.get("problemId"))
+        existing = self.detail_windows.get(key)
+        if existing and existing.alive():
+            existing.focus()
+            return
+        self.detail_windows[key] = ProblemDetailWindow(self.window, problem, self.lesson, self)
+
+    def _ensure_api_key(self):
+        key = (self.config.get("ai_config", {}).get("api_key") or "").strip()
+        if key:
+            return True
+        messagebox.showwarning("尚未配置 API Key",
+                               "请先回到主界面点击「设置」，填写 AI API Key 后再使用 AI 解答。")
+        return False
+
+    def on_solve_all_click(self):
+        if self.solving or not self._ensure_api_key():
+            return
+        targets = [p for p in self.problems
+                   if p.get("result") is None and not (p.get("answers") or [])]
+        if not targets:
+            messagebox.showinfo("提示", "没有需要解答的题目")
+            return
+
+        self.solving = True
+        self.cancel_flag.clear()
+        self.solve_all_btn.state(["disabled"])
+        self.detail_btn.state(["disabled"])
+        self.cancel_btn.pack(side=tk.LEFT, padx=(0, 8), before=self.detail_btn)
+        self.progress.pack(fill=tk.X, pady=(0, 10), before=self.tree.master)
+        self.progress.configure(maximum=len(targets), value=0)
+        self.progress_label.config(text="0 / %d" % len(targets))
+
+        threading.Thread(target=self._solve_all_problems, args=(targets,), daemon=True).start()
+
+    def on_cancel_click(self):
+        self.cancel_flag.set()
+        self.progress_label.config(text="正在停止……")
+
+    def _solve_all_problems(self, targets):
+        from Scripts.AI import call_ai
+
+        total = len(targets)
+        done = threading.Semaphore(0)
+        counter = {"n": 0, "ok": 0, "fail": 0}
+        lock = threading.Lock()
+
+        def work(problem):
+            if self.cancel_flag.is_set():
+                return
+            try:
+                answers = call_ai(self.config, problem.get("image"))
+                problem["answers"] = answers
+                with lock:
+                    counter["ok"] += 1
+            except Exception as exc:
+                with lock:
+                    counter["fail"] += 1
+                self._log("第%s页 AI 解答失败：%s" % (problem.get("page", "?"), exc), 4)
+            finally:
+                with lock:
+                    counter["n"] += 1
+                    n = counter["n"]
+                self._ui(lambda: self._update_progress(n, total))
+
+        workers = max(1, min(8, int(self.config.get("ai_config", {}).get("concurrency", 3))))
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(work, targets))
+        except Exception as exc:
+            self._ui(lambda: messagebox.showerror("错误", "AI 批量解答失败：%s" % exc))
+        finally:
+            self._ui(lambda: self._finish_solving(counter, total))
+
+    def _update_progress(self, n, total):
+        if not self.alive():
+            return
+        self.progress.configure(value=n)
+        self.progress_label.config(text="%d / %d" % (n, total))
+        self.refresh()
+
+    def _finish_solving(self, counter, total):
+        self.solving = False
+        if not self.alive():
+            return
+        self.cancel_btn.pack_forget()
+        self.progress.pack_forget()
+        self.progress_label.config(text="")
+        self.detail_btn.state(["!disabled"])
+        self.refresh()
+
+        if self.cancel_flag.is_set():
+            messagebox.showinfo("已停止", "已停止 AI 解答，已完成 %d 道。" % counter["ok"])
+        elif counter["fail"]:
+            messagebox.showwarning("部分失败",
+                                   "共 %d 道题，成功 %d 道，失败 %d 道。\n失败原因见主界面的系统消息。"
+                                   % (total, counter["ok"], counter["fail"]))
+        else:
+            messagebox.showinfo("完成", "AI 已解答全部 %d 道题目，可逐题核对后提交。" % counter["ok"])
+
+    # ------------------------------------------------------------ 杂项
+
+    def _log(self, message, level=0):
+        if self.main_ui:
+            self.main_ui.add_message("%s %s" % (self.lesson.lessonname, message), level)
+
+    def _ui(self, func):
+        """把回调丢回主线程执行。
+
+        注意：这里不能调用 winfo_exists() 之类的 Tcl 接口——子线程碰 Tcl
+        会抛 RuntimeError，之前被 except 吞掉，导致进度和完成回调全部丢失。
+        """
+        if self._closed:
+            return
+        try:
+            self.window.after(0, func)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def alive(self):
+        """窗口是否还在。_closed 是纯 Python 标志，子线程里判断它不碰 Tcl。"""
+        if self._closed:
+            return False
+        try:
+            return bool(self.window.winfo_exists())
+        except (tk.TclError, RuntimeError):
+            return False
+
+    def focus(self):
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_force()
+
+    def close(self):
+        self._closed = True
+        self.cancel_flag.set()
+        for window in list(self.detail_windows.values()):
+            window.close()
+        self.detail_windows.clear()
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass

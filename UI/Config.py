@@ -1,291 +1,373 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
-import json
-import functools
+# -*- coding: utf-8 -*-
+"""设置对话框：答题策略、AI 服务、弹幕与外观。"""
 import os
-from Scripts.Utils import get_config_path, resource_path
+import platform
+import subprocess
+import threading
+import tkinter as tk
+import webbrowser
+from tkinter import messagebox, ttk
+
+from Scripts.AI import DEFAULT_BASE_URL, DEFAULT_MODEL
+from Scripts.Utils import get_config_dir, save_config
+from UI import Theme
+
+API_KEY_HELP = "https://help.aliyun.com/zh/model-studio/get-api-key"
+
 
 class ConfigDialog:
     def __init__(self, parent, main_window):
         self.parent = parent
         self.main_window = main_window
-        self.top = tk.Toplevel(parent)
-        self.top.title("雨课堂助手设置")
-        self.top.geometry("430x550")
-        # 不设置固定背景色，让系统自动处理
-        self.top.resizable(False, False)
-        
-        # 窗口居中
-        self.center_window()
-        
-        # 设置窗口图标
-        try:
-            ico_path = resource_path("UI/Image/favicon.ico")
-            if os.path.exists(ico_path):
-                self.top.iconbitmap(ico_path)
-        except:
-            pass
-        
-        # 初始化配置
-        self.config = main_window.config.copy()
-        
-        # 创建UI
-        self.create_ui()
-        
-        # 加载配置
-        self.load_config()
-        
-        # 设置关闭窗口时的回调
-        self.top.protocol("WM_DELETE_WINDOW", self.close_window)
-        
-        # 模态窗口
-        self.top.grab_set()
-    
-    def center_window(self):
-        # 窗口居中显示
-        self.top.update_idletasks()
-        width = self.top.winfo_width()
-        height = self.top.winfo_height()
-        x = (self.top.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.top.winfo_screenheight() // 2) - (height // 2)
-        self.top.geometry('{}x{}+{}+{}'.format(width, height, x, y))
-    
-    def create_ui(self):
-        # 创建滚动区域
-        self.scrollbar = tk.Scrollbar(self.top)
-        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.canvas = tk.Canvas(self.top, yscrollcommand=self.scrollbar.set)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.scrollbar.config(command=self.canvas.yview)
-        
-        # 创建内容框架
-        self.content_frame = tk.Frame(self.canvas)
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.content_frame, anchor=tk.NW)
-        
-        # 绑定事件以更新滚动区域
-        self.content_frame.bind("<Configure>", self.on_frame_configure)
-        self.canvas.bind("<Configure>", self.on_canvas_configure)
-        
-        # 创建各个配置区域
-        self.create_danmu_config()
-        self.create_auto_answer_config()
-        self.create_ai_config()
-        self.create_button_area()
-    
-    def on_frame_configure(self, event=None):
-        # 更新滚动区域
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-    
-    def on_canvas_configure(self, event=None):
-        # 调整内容框架宽度以匹配画布
-        self.canvas.itemconfig(self.canvas_window, width=event.width)
-    
-    def create_danmu_config(self):
-        # 弹幕设置区域
-        danmu_frame = tk.LabelFrame(self.content_frame, text="弹幕设置", font=("STHeiti", 10))
-        danmu_frame.pack(fill=tk.X, padx=20, pady=10, ipady=10)
-        
-        # 启用弹幕复选框
-        self.danmu_on_var = tk.BooleanVar()
-        self.danmu_on = tk.Checkbutton(danmu_frame, text="启用自动发送弹幕", variable=self.danmu_on_var, 
-                                      font=("STHeiti", 9), command=self.toggle_danmu_settings)
-        self.danmu_on.pack(anchor=tk.W, pady=5)
-        
-        # 弹幕设置详细选项
-        self.danmu_settings_frame = tk.Frame(danmu_frame)
-        self.danmu_settings_frame.pack(fill=tk.X, padx=20)
-        
-        # 弹幕数量标签
-        danmu_label = tk.Label(self.danmu_settings_frame, text="每门课程最多自动发送弹幕数量:", 
-                              font=("STHeiti", 9))
-        danmu_label.pack(anchor=tk.W, pady=5)
-        
-        # 弹幕数量选择器
-        self.danmu_spinbox_var = tk.IntVar()
-        self.danmu_spinbox = tk.Spinbox(self.danmu_settings_frame, from_=1, to=100, width=10, 
-                                       textvariable=self.danmu_spinbox_var, font=("STHeiti", 9))
-        self.danmu_spinbox.pack(anchor=tk.W, pady=5)
-    
+        self.config = dict(main_window.config)
+        self.saved = False
+        self._closed = False
+        self.theme_changed = False
+        self._original_theme = self.config.get("ui_theme", "auto")
 
-    
-    def create_auto_answer_config(self):
-        # 自动答题设置区域
-        answer_frame = tk.LabelFrame(self.content_frame, text="自动答题设置", font=("STHeiti", 10))
-        answer_frame.pack(fill=tk.X, padx=20, pady=10, ipady=10)
-        
-        # 启用自动答题复选框
+        self.top = tk.Toplevel(parent)
+        self.top.title("设置")
+        self.top.configure(bg=Theme.C["bg"])
+        self.top.resizable(True, True)
+        self.top.minsize(540, 520)
+        Theme.apply_icon(self.top)
+
+        self.create_ui()
+        self.load_config()
+        self.size_to_content()
+
+        self.top.protocol("WM_DELETE_WINDOW", self.close_window)
+        self.top.bind("<Escape>", lambda _: self.close_window())
+        self.top.transient(parent)
+        self.top.grab_set()
+
+    # ------------------------------------------------------------ 界面
+
+    def create_ui(self):
+        root = ttk.Frame(self.top)
+        root.pack(fill=tk.BOTH, expand=True, padx=16, pady=14)
+
+        # 底部按钮先 pack，保证它永远留在窗口里，不会被内容挤掉
+        footer = ttk.Frame(root)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(14, 0))
+
+        notebook = ttk.Notebook(root)
+        notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        notebook.add(self.create_answer_tab(notebook), text="  自动答题  ")
+        notebook.add(self.create_ai_tab(notebook), text="  AI 服务  ")
+        notebook.add(self.create_misc_tab(notebook), text="  弹幕与外观  ")
+
+        ttk.Button(footer, text="打开配置目录", style="Link.TButton",
+                   command=self.open_config_dir).pack(side=tk.LEFT)
+        ttk.Button(footer, text="取消", command=self.close_window, width=8).pack(side=tk.RIGHT)
+        ttk.Button(footer, text="保存设置", style="Accent.TButton",
+                   command=self.save_config, width=10).pack(side=tk.RIGHT, padx=8)
+
+    def size_to_content(self):
+        """按最高的那一页定尺寸，保证每个标签页都装得下，同时不超出屏幕。"""
+        self.top.update_idletasks()
+        width = max(580, self.top.winfo_reqwidth())
+        height = self.top.winfo_reqheight()
+        height = min(height, int(self.top.winfo_screenheight() * 0.85))
+        Theme.center(self.top, width, height)
+
+    @staticmethod
+    def open_config_dir():
+        """在系统文件管理器里打开配置 / 截图目录。"""
+        path = get_config_dir()
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception:
+            webbrowser.open("file://" + path)
+
+    def _tab(self, notebook):
+        frame = ttk.Frame(notebook, style="Surface.TFrame", padding=18)
+        return frame
+
+    def create_answer_tab(self, notebook):
+        tab = self._tab(notebook)
+
         self.auto_answer_var = tk.BooleanVar()
-        self.auto_answer = tk.Checkbutton(answer_frame, text="启用自动答题", variable=self.auto_answer_var, 
-                                         font=("STHeiti", 9), command=self.toggle_answer_settings)
-        self.auto_answer.pack(anchor=tk.W, pady=5)
-        
-        # 自动答题设置详细选项
-        self.answer_settings_frame = tk.Frame(answer_frame)
-        self.answer_settings_frame.pack(fill=tk.X, padx=20)
-        
-        # 延迟类型选择
-        delay_type_frame = tk.Frame(self.answer_settings_frame)
-        delay_type_frame.pack(fill=tk.X, pady=5)
-        
+        ttk.Checkbutton(tab, text="启用自动答题（课上推送题目时自动提交已保存的答案）",
+                        variable=self.auto_answer_var, style="Surface.TCheckbutton",
+                        command=self.toggle_answer_settings).pack(anchor=tk.W)
+
+        self.answer_box = ttk.Frame(tab, style="Surface.TFrame")
+        self.answer_box.pack(fill=tk.X, padx=(22, 0), pady=(10, 0))
+
+        ttk.Label(self.answer_box, text="提交延迟", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        ttk.Label(self.answer_box, text="适当延迟可以让答题时间看起来更自然。",
+                  style="SurfaceMuted.TLabel").pack(anchor=tk.W, pady=(2, 8))
+
         self.delay_type_var = tk.IntVar(value=1)
-        
-        tk.Radiobutton(delay_type_frame, text="随机延迟", variable=self.delay_type_var, value=1, 
-                      font=("STHeiti", 9), command=self.toggle_delay_custom).pack(anchor=tk.W)
-        
-        tk.Radiobutton(delay_type_frame, text="固定延迟", variable=self.delay_type_var, value=2, 
-                      font=("STHeiti", 9), command=self.toggle_delay_custom).pack(anchor=tk.W, pady=(5, 0))
-        
-        # 自定义延迟设置
-        self.delay_custom_frame = tk.Frame(self.answer_settings_frame)
-        self.delay_custom_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(self.delay_custom_frame, text="自定义延迟时间(秒):", 
-                font=("STHeiti", 9)).pack(anchor=tk.W)
-        
+        ttk.Radiobutton(self.answer_box, text="随机延迟（推荐）", variable=self.delay_type_var,
+                        value=1, style="Surface.TRadiobutton",
+                        command=self.toggle_delay_custom).pack(anchor=tk.W)
+        ttk.Radiobutton(self.answer_box, text="固定延迟", variable=self.delay_type_var,
+                        value=2, style="Surface.TRadiobutton",
+                        command=self.toggle_delay_custom).pack(anchor=tk.W, pady=(4, 0))
+
+        self.delay_custom_frame = ttk.Frame(self.answer_box, style="Surface.TFrame")
+        self.delay_custom_frame.pack(fill=tk.X, padx=(22, 0), pady=(6, 0))
+        ttk.Label(self.delay_custom_frame, text="延迟秒数",
+                  style="SurfaceMuted.TLabel").pack(side=tk.LEFT)
         self.custom_time_var = tk.IntVar(value=0)
-        self.custom_time_spinbox = tk.Spinbox(self.delay_custom_frame, from_=0, to=60, width=10, 
-                                            textvariable=self.custom_time_var, font=("STHeiti", 9))
-        self.custom_time_spinbox.pack(anchor=tk.W, pady=5)
-    
-    def create_ai_config(self):
-        # AI设置区域
-        ai_frame = tk.LabelFrame(self.content_frame, text="AI设置", font=("STHeiti", 10))
-        ai_frame.pack(fill=tk.X, padx=20, pady=10, ipady=10)
-        
-        # AI Key标签
-        ai_key_label = tk.Label(ai_frame, text="AI API Key:", 
-                              font=("STHeiti", 9))
-        ai_key_label.pack(anchor=tk.W, pady=5)
-        
-        # AI Key输入框
+        ttk.Spinbox(self.delay_custom_frame, from_=0, to=300, width=8,
+                    textvariable=self.custom_time_var).pack(side=tk.LEFT, padx=10)
+
+        ttk.Separator(self.answer_box).pack(fill=tk.X, pady=16)
+
+        self.auto_ai_var = tk.BooleanVar()
+        ttk.Checkbutton(self.answer_box, text="遇到没有答案的新题目时，自动调用 AI 解答后再提交",
+                        variable=self.auto_ai_var, style="Surface.TCheckbutton").pack(anchor=tk.W)
+        ttk.Label(self.answer_box,
+                  text="关闭时只会提交你事先保存好的答案；开启后会即时消耗 AI 额度，\n"
+                       "且来不及人工核对，请按需选择。",
+                  style="SurfaceMuted.TLabel", justify=tk.LEFT).pack(anchor=tk.W, padx=(22, 0), pady=(4, 0))
+        return tab
+
+    def create_ai_tab(self, notebook):
+        tab = self._tab(notebook)
+
+        ttk.Label(tab, text="服务提供方", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        self.ai_provider_var = tk.StringVar(value="glm")
+        ttk.Radiobutton(tab, text="GLM（Anthropic 兼容接口）", variable=self.ai_provider_var,
+                        value="glm", style="Surface.TRadiobutton",
+                        command=self.toggle_provider).pack(anchor=tk.W, pady=(6, 0))
+        ttk.Radiobutton(tab, text="通义千问 Qwen（dashscope）", variable=self.ai_provider_var,
+                        value="qwen", style="Surface.TRadiobutton",
+                        command=self.toggle_provider).pack(anchor=tk.W, pady=(4, 0))
+
+        ttk.Separator(tab).pack(fill=tk.X, pady=14)
+
+        ttk.Label(tab, text="API Key", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        key_row = ttk.Frame(tab, style="Surface.TFrame")
+        key_row.pack(fill=tk.X, pady=(6, 4))
         self.ai_key_var = tk.StringVar()
-        self.ai_key_entry = tk.Entry(ai_frame, textvariable=self.ai_key_var, width=50, 
-                                    font=("STHeiti", 9), show="*")
-        self.ai_key_entry.pack(anchor=tk.W, pady=5)
-        
-        # 显示/隐藏密码按钮
+        self.ai_key_entry = ttk.Entry(key_row, textvariable=self.ai_key_var, show="•")
+        self.ai_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.show_key_var = tk.BooleanVar()
-        self.show_key_check = tk.Checkbutton(ai_frame, text="显示Key", variable=self.show_key_var, 
-                                           font=("STHeiti", 9), command=self.toggle_key_visibility)
-        self.show_key_check.pack(anchor=tk.W, pady=5)
-        
+        ttk.Checkbutton(key_row, text="显示", variable=self.show_key_var,
+                        style="Surface.TCheckbutton",
+                        command=self.toggle_key_visibility).pack(side=tk.LEFT, padx=10)
+
+        link = ttk.Button(tab, text="如何获取 API Key？", style="SurfaceLink.TButton",
+                          command=lambda: webbrowser.open(API_KEY_HELP))
+        link.pack(anchor=tk.W)
+
+        self.glm_box = ttk.Frame(tab, style="Surface.TFrame")
+        self.glm_box.pack(fill=tk.X, pady=(14, 0))
+
+        ttk.Label(self.glm_box, text="接口地址（Base URL）",
+                  style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        self.ai_base_url_var = tk.StringVar(value=DEFAULT_BASE_URL)
+        ttk.Entry(self.glm_box, textvariable=self.ai_base_url_var).pack(fill=tk.X, pady=(6, 12))
+
+        ttk.Label(self.glm_box, text="模型名称", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        self.ai_model_var = tk.StringVar(value=DEFAULT_MODEL)
+        ttk.Entry(self.glm_box, textvariable=self.ai_model_var).pack(fill=tk.X, pady=(6, 12))
+
+        self.ai_thinking_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.glm_box, text="启用思考模式（正确率更高，但更慢、更费 token）",
+                        variable=self.ai_thinking_var,
+                        style="Surface.TCheckbutton").pack(anchor=tk.W)
+
+        ttk.Separator(tab).pack(fill=tk.X, pady=14)
+
+        conc_row = ttk.Frame(tab, style="Surface.TFrame")
+        conc_row.pack(fill=tk.X)
+        ttk.Label(conc_row, text="批量解题并发数", style="Surface.TLabel").pack(side=tk.LEFT)
+        self.concurrency_var = tk.IntVar(value=3)
+        ttk.Spinbox(conc_row, from_=1, to=8, width=6,
+                    textvariable=self.concurrency_var).pack(side=tk.LEFT, padx=10)
+        ttk.Label(conc_row, text="过高容易被限流", style="SurfaceMuted.TLabel").pack(side=tk.LEFT)
+
+        test_row = ttk.Frame(tab, style="Surface.TFrame")
+        test_row.pack(fill=tk.X, pady=(16, 0))
+        self.test_btn = ttk.Button(test_row, text="测试连接", command=self.on_test_connection, width=10)
+        self.test_btn.pack(side=tk.LEFT)
+        self.test_label = ttk.Label(test_row, text="", style="SurfaceMuted.TLabel", wraplength=340)
+        self.test_label.pack(side=tk.LEFT, padx=12)
+        return tab
+
+    def create_misc_tab(self, notebook):
+        tab = self._tab(notebook)
+
+        ttk.Label(tab, text="弹幕", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        self.danmu_on_var = tk.BooleanVar()
+        ttk.Checkbutton(tab, text="启用自动跟发弹幕", variable=self.danmu_on_var,
+                        style="Surface.TCheckbutton",
+                        command=self.toggle_danmu_settings).pack(anchor=tk.W, pady=(6, 0))
+
+        self.danmu_box = ttk.Frame(tab, style="Surface.TFrame")
+        self.danmu_box.pack(fill=tk.X, padx=(22, 0), pady=(8, 0))
+        ttk.Label(self.danmu_box, text="同一条弹幕被多少人发过之后才跟发",
+                  style="SurfaceMuted.TLabel").pack(anchor=tk.W)
+        self.danmu_spinbox_var = tk.IntVar(value=5)
+        ttk.Spinbox(self.danmu_box, from_=1, to=100, width=8,
+                    textvariable=self.danmu_spinbox_var).pack(anchor=tk.W, pady=6)
+
+        ttk.Separator(tab).pack(fill=tk.X, pady=18)
+
+        ttk.Label(tab, text="外观", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        ttk.Label(tab, text="修改后需要重新启动程序才会生效。",
+                  style="SurfaceMuted.TLabel").pack(anchor=tk.W, pady=(2, 8))
+        self.theme_var = tk.StringVar(value="auto")
+        for value, text in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
+            ttk.Radiobutton(tab, text=text, variable=self.theme_var, value=value,
+                            style="Surface.TRadiobutton").pack(anchor=tk.W, pady=2)
+        return tab
+
+    # ------------------------------------------------------------ 联动
+
     def toggle_key_visibility(self):
-        # 切换AI Key的显示/隐藏
-        if self.show_key_var.get():
-            self.ai_key_entry.config(show="")
-        else:
-            self.ai_key_entry.config(show="*")
-            
-    def create_button_area(self):
-        # 按钮区域
-        button_frame = tk.Frame(self.content_frame)
-        button_frame.pack(fill=tk.X, padx=20, pady=20)
-        
-        # 保存按钮
-        save_button = tk.Button(button_frame, text="保存设置", command=self.save_config, width=15, 
-                              font=("STHeiti", 9))
-        save_button.pack(anchor=tk.CENTER)
-    
+        self.ai_key_entry.config(show="" if self.show_key_var.get() else "•")
+
+    def toggle_provider(self):
+        state = ["!disabled"] if self.ai_provider_var.get() == "glm" else ["disabled"]
+        for child in self.glm_box.winfo_children():
+            try:
+                child.state(state)
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _set_state(self, container, enabled):
+        """递归启用/禁用一组控件；纯文本标签只改颜色，避免 clam 主题画出难看的底色。"""
+        for child in container.winfo_children():
+            if isinstance(child, ttk.Label):
+                child.configure(foreground=Theme.C["muted"] if enabled else Theme.C["faint"])
+            else:
+                try:
+                    child.state(["!disabled"] if enabled else ["disabled"])
+                except (AttributeError, tk.TclError):
+                    pass
+            if child.winfo_children():
+                self._set_state(child, enabled)
+
+    def toggle_danmu_settings(self):
+        self._set_state(self.danmu_box, self.danmu_on_var.get())
+
+    def toggle_answer_settings(self):
+        self._set_state(self.answer_box, self.auto_answer_var.get())
+        self.toggle_delay_custom()
+
+    def toggle_delay_custom(self):
+        enabled = self.auto_answer_var.get() and self.delay_type_var.get() == 2
+        self._set_state(self.delay_custom_frame, enabled)
+
+    # ------------------------------------------------------------ 读写配置
+
     def load_config(self):
-        # 加载配置到UI控件
-        # 弹幕设置
         self.danmu_on_var.set(self.config.get("auto_danmu", True))
         self.danmu_spinbox_var.set(self.config.get("danmu_config", {}).get("danmu_limit", 5))
-        
 
-        
-        # 自动答题设置
+        answer_config = self.config.get("answer_config", {})
         self.auto_answer_var.set(self.config.get("auto_answer", True))
-        answer_delay = self.config.get("answer_config", {}).get("answer_delay", {})
-        self.delay_type_var.set(answer_delay.get("type", 1))
-        self.custom_time_var.set(answer_delay.get("custom", {}).get("time", 0))
-        
-        # AI设置
-        self.ai_key_var.set(self.config.get("ai_config", {}).get("api_key", ""))
-        
-        # 初始化UI状态
+        self.auto_ai_var.set(answer_config.get("auto_ai", False))
+        delay = answer_config.get("answer_delay", {})
+        self.delay_type_var.set(delay.get("type", 1))
+        self.custom_time_var.set(delay.get("custom", {}).get("time", 0))
+
+        ai_config = self.config.get("ai_config", {})
+        self.ai_provider_var.set(ai_config.get("provider", "glm"))
+        self.ai_base_url_var.set(ai_config.get("base_url", DEFAULT_BASE_URL))
+        self.ai_model_var.set(ai_config.get("model", DEFAULT_MODEL))
+        self.ai_key_var.set(ai_config.get("api_key", ""))
+        self.ai_thinking_var.set(ai_config.get("enable_thinking", True))
+        self.concurrency_var.set(ai_config.get("concurrency", 3))
+
+        self.theme_var.set(self.config.get("ui_theme", "auto"))
+
         self.toggle_danmu_settings()
         self.toggle_answer_settings()
-        self.toggle_delay_custom()
-    
-    def toggle_danmu_settings(self):
-        # 切换弹幕设置区域的可用状态
-        state = tk.NORMAL if self.danmu_on_var.get() else tk.DISABLED
-        
-        for child in self.danmu_settings_frame.winfo_children():
-            # 只对支持state选项的控件设置状态
-            if hasattr(child, 'config') and 'state' in child.config():
-                child.config(state=state)
-    
+        self.toggle_provider()
 
-    
-    def toggle_answer_settings(self):
-        # 切换自动答题设置区域的可用状态
-        state = tk.NORMAL if self.auto_answer_var.get() else tk.DISABLED
-        
-        # 直接控制单选按钮的状态，而不是尝试设置整个Frame的状态
-        # 查找delay_type_frame中的单选按钮并设置其状态
-        for frame in self.answer_settings_frame.winfo_children():
-            if isinstance(frame, tk.Frame):
-                for widget in frame.winfo_children():
-                    # 只对支持state选项的控件设置状态
-                    if hasattr(widget, 'config') and 'state' in widget.config():
-                        widget.config(state=state)
-        
-        # 特别处理延迟设置区域
-        self.toggle_delay_custom()
-    
-    def toggle_delay_custom(self):
-        # 切换自定义延迟设置的可用状态
-        # 只有在启用自动答题且选择固定延迟时才可用
-        state = tk.NORMAL if (self.auto_answer_var.get() and self.delay_type_var.get() == 2) else tk.DISABLED
-        
-        for child in self.delay_custom_frame.winfo_children():
-            # 只对支持state选项的控件设置状态
-            if hasattr(child, 'config') and 'state' in child.config():
-                child.config(state=state)
-    
+    def _read_ai_config(self):
+        return {
+            "provider": self.ai_provider_var.get(),
+            "api_key": self.ai_key_var.get().strip(),
+            "base_url": self.ai_base_url_var.get().strip() or DEFAULT_BASE_URL,
+            "model": self.ai_model_var.get().strip() or DEFAULT_MODEL,
+            "enable_thinking": self.ai_thinking_var.get(),
+            "concurrency": max(1, min(8, self._safe_int(self.concurrency_var, 3))),
+        }
+
+    @staticmethod
+    def _safe_int(var, fallback):
+        try:
+            return int(var.get())
+        except (tk.TclError, ValueError):
+            return fallback
+
+    def on_test_connection(self):
+        from Scripts.AI import test_connection
+
+        ai_config = self._read_ai_config()
+        self.test_btn.state(["disabled"])
+        self.test_label.config(text="正在测试……", foreground=Theme.C["muted"])
+
+        def work():
+            try:
+                message = test_connection(ai_config)
+            except Exception as exc:
+                self._ui(lambda: self.test_label.config(text="✗ %s" % exc,
+                                                        foreground=Theme.C["danger"]))
+            else:
+                self._ui(lambda: self.test_label.config(text="✓ %s" % message,
+                                                        foreground=Theme.C["success"]))
+            finally:
+                self._ui(lambda: self.test_btn.state(["!disabled"]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ui(self, func):
+        """把回调丢回主线程；子线程里不碰 Tcl 接口。"""
+        if self._closed:
+            return
+        try:
+            self.top.after(0, func)
+        except (tk.TclError, RuntimeError):
+            pass
+
     def save_config(self):
-        # 保存配置
-        # 更新配置
         self.config["auto_danmu"] = self.danmu_on_var.get()
         self.config["danmu_config"] = {
-            "danmu_limit": self.danmu_spinbox_var.get()
+            "danmu_limit": max(1, self._safe_int(self.danmu_spinbox_var, 5)),
         }
-        
-
-        
         self.config["auto_answer"] = self.auto_answer_var.get()
         self.config["answer_config"] = {
             "answer_delay": {
                 "type": self.delay_type_var.get(),
-                "custom": {
-                    "time": self.custom_time_var.get()
-                }
-            }
+                "custom": {"time": max(0, self._safe_int(self.custom_time_var, 0))},
+            },
+            "auto_ai": self.auto_ai_var.get(),
         }
-        
-        # AI设置
-        self.config["ai_config"] = {
-            "api_key": self.ai_key_var.get()
-        }
-        
-        # 保存到文件
-        config_path = get_config_path()
-        with open(config_path, 'w') as f:
-            json.dump(self.config, f, ensure_ascii=False, indent=4)
-        
-        # 更新主窗口的配置
-        self.main_window.config = self.config
-        
-        # 显示保存成功消息
-        messagebox.showinfo("提示", "配置已保存")
-        
-        # 关闭窗口
+        self.config["ai_config"] = self._read_ai_config()
+        self.config["ui_theme"] = self.theme_var.get()
+
+        try:
+            save_config(self.config)
+        except Exception as exc:
+            messagebox.showerror("保存失败", "无法写入配置文件：%s" % exc, parent=self.top)
+            return
+
+        # 让正在监听的课程立刻用上新配置
+        self.main_window.config.clear()
+        self.main_window.config.update(self.config)
+
+        self.saved = True
+        self.theme_changed = self.config["ui_theme"] != self._original_theme
         self.close_window()
-    
+
     def close_window(self):
-        # 关闭窗口
+        self._closed = True
+        try:
+            self.top.grab_release()
+        except tk.TclError:
+            pass
         self.top.destroy()
