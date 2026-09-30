@@ -164,12 +164,24 @@ class ProblemListWindow:
         if problem is None:
             messagebox.showinfo("提示", "请先在列表中选择一道题目")
             return
+        self.open_problem(problem)
+
+    def open_problem(self, problem):
+        """打开（或聚焦）某道题的详情窗口；点提醒浮窗时也走这里。"""
         key = str(problem.get("problemId"))
         existing = self.detail_windows.get(key)
         if existing and existing.alive():
             existing.focus()
-            return
-        self.detail_windows[key] = ProblemDetailWindow(self.window, problem, self.lesson, self)
+            return existing
+        # 同步列表选中项，方便用户对上号
+        for idx, item in enumerate(getattr(self, "problems", [])):
+            if item.get("problemId") == problem.get("problemId") and self.tree.exists(str(idx)):
+                self.tree.selection_set(str(idx))
+                self.tree.see(str(idx))
+                break
+        window = ProblemDetailWindow(self.window, problem, self.lesson, self)
+        self.detail_windows[key] = window
+        return window
 
     def _ensure_api_key(self):
         key = (self.config.get("ai_config", {}).get("api_key") or "").strip()

@@ -17,7 +17,9 @@ API_KEY_HELP = "https://help.aliyun.com/zh/model-studio/get-api-key"
 
 
 class ConfigDialog:
-    def __init__(self, parent, main_window):
+    TABS = {"answer": 0, "ai": 1, "notify": 2, "misc": 3}
+
+    def __init__(self, parent, main_window, tab=None):
         self.parent = parent
         self.main_window = main_window
         self.config = dict(main_window.config)
@@ -36,6 +38,8 @@ class ConfigDialog:
         self.create_ui()
         self.load_config()
         self.size_to_content()
+        if tab in self.TABS:
+            self.notebook.select(self.TABS[tab])
 
         self.top.protocol("WM_DELETE_WINDOW", self.close_window)
         self.top.bind("<Escape>", lambda _: self.close_window())
@@ -53,9 +57,11 @@ class ConfigDialog:
         footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(14, 0))
 
         notebook = ttk.Notebook(root)
+        self.notebook = notebook
         notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         notebook.add(self.create_answer_tab(notebook), text="  自动答题  ")
         notebook.add(self.create_ai_tab(notebook), text="  AI 服务  ")
+        notebook.add(self.create_notify_tab(notebook), text="  提醒与启动  ")
         notebook.add(self.create_misc_tab(notebook), text="  弹幕与外观  ")
 
         ttk.Button(footer, text="打开配置目录", style="Link.TButton",
@@ -236,6 +242,68 @@ class ConfigDialog:
         self.test_label.pack(side=tk.LEFT, padx=12)
         return tab
 
+    def create_notify_tab(self, notebook):
+        from UI.Notify import KINDS
+        tab = self._tab(notebook)
+
+        ttk.Label(tab, text="启动", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        self.auto_monitor_var = tk.BooleanVar()
+        ttk.Checkbutton(tab, text="打开程序时自动开始监听（确认已登录后才会开始）",
+                        variable=self.auto_monitor_var,
+                        style="Surface.TCheckbutton").pack(anchor=tk.W, pady=(6, 0))
+
+        ttk.Separator(tab).pack(fill=tk.X, pady=14)
+
+        ttk.Label(tab, text="提醒", style="SurfaceSection.TLabel").pack(anchor=tk.W)
+        ttk.Label(tab, text="上课时不用一直盯着窗口，有事会叫你。",
+                  style="SurfaceMuted.TLabel").pack(anchor=tk.W, pady=(2, 8))
+        self.notify_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tab, text="开启提醒", variable=self.notify_enabled_var,
+                        style="Surface.TCheckbutton",
+                        command=self.toggle_notify_settings).pack(anchor=tk.W)
+
+        self.notify_box = ttk.Frame(tab, style="Surface.TFrame")
+        self.notify_box.pack(fill=tk.X, padx=(22, 0), pady=(6, 0))
+
+        ttk.Label(self.notify_box, text="什么时候提醒", style="SurfaceMuted.TLabel").pack(anchor=tk.W)
+        self.notify_kind_vars = {}
+        for key, (label, default) in KINDS.items():
+            var = tk.BooleanVar(value=default)
+            self.notify_kind_vars[key] = var
+            text = label + ("（紧急：响三声并把窗口拉到最前）" if key == "callme" else "")
+            ttk.Checkbutton(self.notify_box, text=text, variable=var,
+                            style="Surface.TCheckbutton").pack(anchor=tk.W, pady=1)
+
+        ttk.Label(self.notify_box, text="用什么方式", style="SurfaceMuted.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        self.notify_way_vars = {}
+        for key, label in (("system", "系统通知"), ("sound", "提示音"), ("toast", "屏幕右下角浮窗")):
+            var = tk.BooleanVar(value=True)
+            self.notify_way_vars[key] = var
+            ttk.Checkbutton(self.notify_box, text=label, variable=var,
+                            style="Surface.TCheckbutton").pack(anchor=tk.W, pady=1)
+
+        row = ttk.Frame(self.notify_box, style="Surface.TFrame")
+        row.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(row, text="试一下", command=self.on_test_notify, width=8).pack(side=tk.LEFT)
+        ttk.Label(row, text="按当前勾选发一条测试提醒（不用先保存）",
+                  style="SurfaceMuted.TLabel").pack(side=tk.LEFT, padx=10)
+        return tab
+
+    def _read_notify_config(self):
+        cfg = {"enabled": self.notify_enabled_var.get()}
+        cfg.update({k: v.get() for k, v in self.notify_way_vars.items()})
+        cfg.update({k: v.get() for k, v in self.notify_kind_vars.items()})
+        return cfg
+
+    def toggle_notify_settings(self):
+        self._set_state(self.notify_box, self.notify_enabled_var.get())
+
+    def on_test_notify(self):
+        from UI.Notify import Notifier
+        preview = {"notify_config": dict(self._read_notify_config(), problem=True, enabled=True)}
+        Notifier(self.top, lambda: preview).notify(
+            "problem", "测试提醒", "这就是上课推题时你会收到的提醒样子")
+
     def create_misc_tab(self, notebook):
         tab = self._tab(notebook)
 
@@ -386,6 +454,17 @@ class ConfigDialog:
 
         self.theme_var.set(self.config.get("ui_theme", "auto"))
 
+        from UI.Notify import default_config as notify_defaults
+        ncfg = notify_defaults()
+        ncfg.update(self.config.get("notify_config") or {})
+        self.notify_enabled_var.set(ncfg.get("enabled", True))
+        for k, var in self.notify_way_vars.items():
+            var.set(ncfg.get(k, True))
+        for k, var in self.notify_kind_vars.items():
+            var.set(ncfg.get(k, True))
+        self.auto_monitor_var.set(self.config.get("auto_monitor", False))
+        self.toggle_notify_settings()
+
         self.toggle_danmu_settings()
         self.toggle_answer_settings()
         self.toggle_provider()
@@ -457,6 +536,8 @@ class ConfigDialog:
         migrate_answer_mode(self.config)
         self.config["ai_config"] = self._read_ai_config()
         self.config["ui_theme"] = self.theme_var.get()
+        self.config["notify_config"] = self._read_notify_config()
+        self.config["auto_monitor"] = self.auto_monitor_var.get()
 
         try:
             save_config(self.config)

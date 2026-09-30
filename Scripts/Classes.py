@@ -127,6 +127,15 @@ class Lesson:
             self.notify_update()
         return added
 
+    def notify_event(self, kind, title, message, urgent=False, problem=None):
+        """把一个课堂事件交给 UI 去提醒（UI 没实现就忽略）。"""
+        notify = getattr(self.main_ui, "notify_event", None)
+        if notify:
+            try:
+                notify(kind, title, message, urgent=urgent, lesson=self, problem=problem)
+            except Exception:
+                pass
+
     def notify_update(self):
         """通知 UI 刷新本课程相关的界面。"""
         notify = getattr(self.main_ui, "on_lesson_updated", None)
@@ -274,14 +283,23 @@ class Lesson:
         if mode == "notify":
             self.add_message("%s 推送了新题目（第%s页），%s，请自行前往雨课堂作答"
                              % (self.lessonname, page, window), 7)
+            self.notify_event("problem", "新题目：%s" % self.lessonname,
+                              "第%s页 %s，%s —— 需要你自己作答"
+                              % (page, problem_type_name(problem), window), problem=problem)
             return
         if mode == "saved" and not problem.get("answers"):
             # 「只提交已保存答案」模式下绝不偷偷调用 AI
             self.add_message("%s 第%s页还没有保存答案，%s，请手动作答或打开题目让 AI 解答"
                              % (self.lessonname, page, window), 8)
+            self.notify_event("problem", "新题目（没有答案）：%s" % self.lessonname,
+                              "第%s页 %s，%s —— 还没保存答案，需要你处理"
+                              % (page, problem_type_name(problem), window), problem=problem)
             return
 
         self.add_message("%s 推送了新题目（第%s页），%s" % (self.lessonname, page, window), 7)
+        self.notify_event("problem", "新题目：%s" % self.lessonname,
+                          "第%s页 %s，%s" % (page, problem_type_name(problem), window),
+                          problem=problem)
         self.start_answer(problemid, limit)
 
     def start_answer(self, problemid, limit):
@@ -430,6 +448,8 @@ class Lesson:
             elif op == "lessonfinished":
                 self.add_message("%s 下课了" % self.lessonname, 0)
                 self.finished = True
+                self.notify_event("lesson", "下课了", "%s 已下课，共 %d 道题，已提交 %d 道"
+                                  % (self.lessonname, self.problem_count, self.answered_count))
                 wsapp.close()
 
             elif op in ("presentationupdated", "presentationcreated"):
@@ -441,7 +461,12 @@ class Lesson:
             elif op == "callpaused":
                 name = data.get("name")
                 meg = "%s 点名了，点到了：%s" % (self.lessonname, name)
-                self.add_message(meg, 5 if self.user_uname == name else 6)
+                is_me = self.user_uname == name
+                self.add_message(meg, 5 if is_me else 6)
+                if is_me:
+                    self.notify_event("callme", "点到你了！",
+                                      "%s 正在点名，点到了你（%s）" % (self.lessonname, name),
+                                      urgent=True)
 
             # 程序在上课中途运行，查询已解锁题目数据得到的返回值，
             # 此处需要筛选未到期的题目进行回答。

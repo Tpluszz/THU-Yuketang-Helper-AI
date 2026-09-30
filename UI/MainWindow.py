@@ -14,6 +14,8 @@ from UI import Theme
 from UI.ConfirmDialog import ConfirmAnswerDialog
 from UI.Config import ConfigDialog
 from UI.Login import LoginDialog
+from UI.Notify import Notifier
+from UI.Onboarding import OnboardingDialog
 from UI.ProblemListWindow import ProblemListWindow
 from UI.TestData import create_test_lesson, get_test_lessons
 
@@ -52,12 +54,18 @@ class MainWindow:
         self.lesson_list = []            # 接口返回的原始课程数据
         self.finished_lesson_ids = set()  # 已下课的课程 id，避免反复重连
         self.problem_windows = {}        # lessonid -> ProblemListWindow
+        self.login_state = "checking"
+        self._last_login_check = 0.0
+        self.notifier = Notifier(master, lambda: self.config)
 
         self.create_ui()
         self.bind_events()
 
         self.add_message("程序已启动，配置目录：%s" % get_config_dir(), 0)
         self.refresh_account_state()
+        # 第一次打开：弹上手清单（跳过或完成后不再自动弹）
+        if not self.config.get("onboarded"):
+            self.master.after(700, self.show_onboarding)
 
     # ------------------------------------------------------------ 界面
 
@@ -89,9 +97,14 @@ class MainWindow:
         left.pack(side=tk.LEFT)
         tk.Label(left, text="清华大学雨课堂助手", font=Theme.font(17, "bold"),
                  fg=c["header_text"], bg=c["header"]).pack(anchor=tk.W)
-        self.account_label = tk.Label(left, text="未登录", font=Theme.font(10),
-                                      fg=c["header_sub"], bg=c["header"])
-        self.account_label.pack(anchor=tk.W, pady=(3, 0))
+        status_row = tk.Frame(left, bg=c["header"])
+        status_row.pack(anchor=tk.W, pady=(5, 0))
+        self.login_dot = tk.Label(status_row, text="●", font=Theme.font(12),
+                                  fg=c["header_sub"], bg=c["header"])
+        self.login_dot.pack(side=tk.LEFT)
+        self.account_label = tk.Label(status_row, text="正在检查登录……", font=Theme.font(11),
+                                      fg=c["header_text"], bg=c["header"])
+        self.account_label.pack(side=tk.LEFT, padx=(5, 0))
 
         right = tk.Frame(inner, bg=c["header"])
         right.pack(side=tk.RIGHT)
@@ -116,6 +129,8 @@ class MainWindow:
         self.course_hint.pack(side=tk.LEFT, padx=10)
         self.monitor_badge = Theme.Badge(head, "未监听", "muted")
         self.monitor_badge.pack(side=tk.RIGHT)
+        ttk.Button(head, text="上手清单", style="Link.TButton",
+                   command=self.show_onboarding).pack(side=tk.RIGHT, padx=(0, 10))
 
         wrap = Theme.card(panel)
         wrap.pack(fill=tk.BOTH, expand=True)
@@ -232,6 +247,23 @@ class MainWindow:
     def set_status(self, text):
         self._ui(lambda: self.status_label.config(text=text))
 
+    # 标题栏是深色底，状态灯用亮一些的颜色
+    LOGIN_STATES = {
+        "checking": ("#9AA1AC", "正在检查登录……", "登录"),
+        "ok":       ("#4ADE80", "已登录 · %s", "切换账号"),
+        "none":     ("#F87171", "未登录 —— 点右边「登录」用微信扫码", "登录"),
+        "expired":  ("#FBBF24", "登录已过期 —— 请点「重新登录」扫码", "重新登录"),
+        "offline":  ("#FBBF24", "暂时无法确认登录状态（网络异常）", "登录"),
+    }
+
+    def set_login_state(self, state, name=""):
+        """更新标题栏状态灯与登录按钮文字（必须在主线程调用）。"""
+        self.login_state = state
+        color, text, button = self.LOGIN_STATES[state]
+        self.login_dot.config(fg=color)
+        self.account_label.config(text=text % name if "%s" in text else text)
+        self.login_btn.config(text=button)
+
     def refresh_account_state(self):
         """刷新标题栏的登录信息与状态栏的 AI 配置摘要。"""
         from Scripts.AI import PROVIDERS, normalize_provider
@@ -244,21 +276,43 @@ class MainWindow:
             self.ai_label.config(text="AI：未配置 API Key", fg=Theme.C["warning"])
 
         if not self.config.get("sessionid"):
-            self.account_label.config(text="未登录 · 请先点击「登录」扫码")
+            self.set_login_state("none")
             return
-        self.account_label.config(text="已登录" + ("（%s）" % self.user_name if self.user_name else ""))
+        self.set_login_state("checking")
         # 登录态是否还有效需要联网确认，放到后台做
         threading.Thread(target=self._probe_account, daemon=True).start()
 
-    def _probe_account(self):
+    def _probe_account(self, notify_on_fail=False, auto_start=True):
+        """联网确认 sessionid 是否有效。网络问题与登录失效分开处理。"""
         from Scripts.Utils import get_user_info
+        self._last_login_check = time.time()
         try:
             _, data = get_user_info(self.config["sessionid"])
-            self.user_name = data.get("name", "")
-            text = "已登录：%s" % self.user_name
+        except requests.exceptions.RequestException:
+            self._ui(lambda: self.set_login_state("offline"))
+            return False
         except Exception:
-            text = "登录状态可能已过期，请重新登录"
-        self._ui(lambda: self.account_label.config(text=text))
+            def expired():
+                was_ok = self.login_state == "ok"
+                self.set_login_state("expired")
+                if notify_on_fail or was_ok:
+                    self.add_message("登录已过期，请重新扫码登录", 4)
+                    self.notify_event("login", "登录已过期",
+                                      "雨课堂登录失效了，监听收不到新题，请重新扫码登录",
+                                      urgent=True)
+            self._ui(expired)
+            return False
+
+        self.user_name = data.get("name", "")
+        def ok():
+            self.set_login_state("ok", self.user_name)
+            # 打开即监听：只在确认登录有效之后才自动开始
+            if (auto_start and self.config.get("auto_monitor") and not self.is_active
+                    and not self.test_mode):
+                self.add_message("已开启「打开即监听」，自动开始监听", 0)
+                self.toggle_monitor()
+        self._ui(ok)
+        return True
 
     def update_empty_hint(self):
         if self.tree.get_children():
@@ -267,6 +321,26 @@ class MainWindow:
             self.empty_hint.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
 
     # ------------------------------------------------------------ 课程列表
+
+    def notify_event(self, kind, title, message, urgent=False, lesson=None, problem=None):
+        """课程线程与各窗口统一从这里发提醒；点提醒浮窗会打开对应课程/题目。"""
+        on_click = None
+        if lesson is not None:
+            on_click = lambda: self.open_lesson(lesson, problem)
+        self.notifier.notify(kind, title, message, urgent=urgent, on_click=on_click)
+
+    def open_lesson(self, lesson, problem=None):
+        """打开（或聚焦）某门课的题目列表，可选地直接打开其中一道题。"""
+        key = str(lesson.lessonid)
+        window = self.problem_windows.get(key)
+        if window is None or not window.alive():
+            window = ProblemListWindow(self.master, lesson, self)
+            self.problem_windows[key] = window
+        else:
+            window.focus()
+        if problem is not None:
+            window.open_problem(problem)
+        return window
 
     def on_course_open(self, _event=None):
         """打开选中课程的题目列表。"""
@@ -279,14 +353,16 @@ class MainWindow:
             messagebox.showinfo("提示", "该课程还未完成签到，请稍候再试")
             return
 
-        existing = self.problem_windows.get(lessonid)
-        if existing and existing.alive():
-            existing.focus()
-            return
-        self.problem_windows[lessonid] = ProblemListWindow(self.master, lesson, self)
+        self.open_lesson(lesson)
 
     def confirm_answer(self, lesson, problem, answers, timeout, on_decided):
         """ai_confirm 模式下由课程线程调用：在主线程弹确认框，结果通过回调返回。"""
+        self.notify_event("confirm", "AI 答完了，等你确认",
+                          "%s 第%s页 答案：%s（%d 秒内不点就不提交）"
+                          % (lesson.lessonname, problem.get("page", "?"),
+                             "、".join(map(str, answers)), timeout),
+                          urgent=True)
+
         def show():
             try:
                 ConfirmAnswerDialog(self.master, lesson, problem, answers, timeout, on_decided)
@@ -456,6 +532,9 @@ class MainWindow:
                 network_status = False
             except Exception as exc:
                 self.add_message("获取课程列表异常：%s" % exc, 8)
+                # 非网络错误多半是登录失效；限流到一分钟查一次
+                if time.time() - self._last_login_check > 60:
+                    self._probe_account(notify_on_fail=True, auto_start=False)
 
             # 网络异常处理
             while self.is_active and not network_status:
@@ -493,6 +572,8 @@ class MainWindow:
                 threading.Thread(target=lesson_obj.start_lesson, args=(del_onclass,),
                                  daemon=True).start()
                 self.add_message("检测到课程 %s 正在上课，已加入监听列表" % lesson_obj.lessonname, 7)
+                self.notify_event("lesson", "上课了：%s" % lesson_obj.lessonname,
+                                  "已自动签到，开始监听推题", lesson=lesson_obj)
                 self.update_course_table()
 
             if not self._interruptible_sleep(POLL_SECONDS):
@@ -508,18 +589,35 @@ class MainWindow:
 
     # ------------------------------------------------------------ 对话框
 
+    def reload_config(self):
+        """原地更新配置。Lesson 持有的是同一个 dict 的引用，
+        如果这里换成新对象，正在上的课就再也读不到之后的设置改动了。"""
+        fresh = load_config()
+        self.config.clear()
+        self.config.update(fresh)
+
     def show_login(self):
         dialog = LoginDialog(self.master, self)
         self.master.wait_window(dialog.top)
-        self.config = load_config()
+        self.reload_config()
         self.refresh_account_state()
         if dialog.login_success:
             self.add_message("登录成功", 0)
 
-    def show_config(self):
-        dialog = ConfigDialog(self.master, self)
+    def show_onboarding(self):
+        existing = getattr(self, "_onboarding", None)
+        try:
+            if existing and existing.top.winfo_exists():
+                existing.top.lift()
+                return
+        except tk.TclError:
+            pass
+        self._onboarding = OnboardingDialog(self)
+
+    def show_config(self, tab=None):
+        dialog = ConfigDialog(self.master, self, tab=tab)
         self.master.wait_window(dialog.top)
-        self.config = load_config()
+        self.reload_config()
         self.refresh_account_state()
         if dialog.saved and dialog.theme_changed:
             messagebox.showinfo("提示", "外观设置将在下次启动程序后生效")
@@ -566,6 +664,7 @@ class MainWindow:
         if self.is_active and not messagebox.askokcancel("确认退出", "监听正在运行，确定要退出吗？"):
             return
         self._closed = True
+        self.notifier.close()
         self.is_active = False
         for lesson in list(self.on_lesson_list):
             lesson.stop()

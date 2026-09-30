@@ -111,6 +111,14 @@ def get_initial_data():
             "mode": "saved",
             "confirm_timeout": 60,          # ai_confirm 的确认框等待秒数
         },
+        # 提醒：系统通知 / 提示音 / 程序内浮窗，以及各类事件的开关
+        "notify_config": {
+            "enabled": True, "sound": True, "system": True, "toast": True,
+            "problem": True, "callme": True, "confirm": True,
+            "lesson": True, "login": True,
+        },
+        "auto_monitor": False,              # 打开程序且已登录时自动开始监听
+        "onboarded": False,                 # 是否已看过上手清单
         "ai_config": {
             "provider": "anthropic",
             "api_key": "",
