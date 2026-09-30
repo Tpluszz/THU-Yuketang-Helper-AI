@@ -70,7 +70,7 @@ def system_notify(title, message):
     return False
 
 
-def play_sound(urgent=False, fallback=None):
+def play_sound(urgent=False):
     """播放提示音；紧急提醒连响三次。"""
     times = 3 if urgent else 1
 
@@ -100,7 +100,39 @@ def play_sound(urgent=False, fallback=None):
                         ok = subprocess.call([player, sound], stdout=subprocess.DEVNULL,
                                              stderr=subprocess.DEVNULL) == 0
                         break
-            if not ok and fallback:
-                fallback()
 
     threading.Thread(target=work, daemon=True).start()
+
+
+class Notifier:
+    """按设置分发提醒。系统通知与提示音在这里发；界面内浮窗、窗口前置交给回调。
+
+    notify() 可以从任意线程调用。
+    """
+
+    def __init__(self, get_config, show_toast=None, raise_window=None):
+        self.get_config = get_config
+        self.show_toast = show_toast
+        self.raise_window = raise_window
+
+    def settings(self):
+        cfg = default_config()
+        cfg.update((self.get_config() or {}).get("notify_config") or {})
+        return cfg
+
+    def notify(self, kind, title, message, urgent=False, target=None, force=False):
+        """返回是否实际发出。force 供设置页的「试一下」使用。"""
+        cfg = self.settings()
+        if not force and (not cfg.get("enabled", True) or not cfg.get(kind, True)):
+            return False
+        if cfg.get("system", True):
+            system_notify(title, message)
+        if cfg.get("sound", True):
+            play_sound(urgent)
+        # 紧急提醒即使关了浮窗也要显示：点名是不能错过的
+        if self.show_toast and (cfg.get("toast", True) or urgent):
+            self.show_toast({"kind": kind, "title": title, "message": message,
+                             "urgent": bool(urgent), "target": target})
+        if urgent and self.raise_window:
+            self.raise_window()
+        return True

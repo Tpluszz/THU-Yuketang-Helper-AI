@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雨课堂助手</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app" class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="9" fill="currentColor"/>
+        <path d="M9 10.5v6M9 20v2.5M13 9v4.5M13 17v7M17 11v3.5M17 18v4.5" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M20.5 11.2 25 10v13l-4.5 1.2z" fill="#fff"/>
+      </svg>
+      <div>
+        <div class="brand-name">雨课堂助手</div>
+        <div class="brand-sub">清华荷塘 · 非官方</div>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item" data-act="nav" data-view="home">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v11H4zM8 20h8M12 16v4"/></svg><span>课堂</span>
+      </button>
+      <button class="nav-item" data-act="nav" data-view="history">
+        <svg viewBox="0 0 24 24"><path d="M12 7v5l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4"/></svg><span>历史记录</span>
+      </button>
+      <button class="nav-item" data-act="nav" data-view="settings">
+        <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <button class="account" id="account" data-act="account"></button>
+      <label class="switch-row">
+        <span>测试模式</span>
+        <input type="checkbox" id="test-toggle" data-act="test-mode">
+        <span class="switch"></span>
+      </label>
+    </div>
+  </aside>
+
+  <main class="main" id="main"></main>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal-root"></div>
+
+<script src="app.js"></script>
+<script>
+  // 在普通浏览器里预览界面：地址后加 ?mock 使用假数据
+  if (location.search.indexOf("mock") >= 0) {
+    var s = document.createElement("script"); s.src = "mock.js"; document.body.appendChild(s);
+  }
+</script>
+</body>
+</html>

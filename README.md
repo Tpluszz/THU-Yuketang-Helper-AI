@@ -1,84 +1,61 @@
 # 清华大学荷塘雨课堂助手 - AI 版
 
-基于 *TrickyDeath* 的项目 [RainClassroomAssistant](https://github.com/TrickyDeath/RainClassroomAssitant) 进行修改，以专门适配清华大学的荷塘雨课堂。
-
-基于 [THU-Yuketang-Helper](https://github.com/zhangchi2004/THU-Yuketang-Helper) 进一步适配，适配无法从前端爬取答案后的荷塘雨课堂。
+基于 *TrickyDeath* 的 [RainClassroomAssistant](https://github.com/TrickyDeath/RainClassroomAssitant)，
+经 [THU-Yuketang-Helper](https://github.com/zhangchi2004/THU-Yuketang-Helper) 适配清华荷塘雨课堂。
 
 ## 功能
 
-- **自动签到**：检测到课程开始后自动签到并建立监听
-- **AI 答题 / 手动答题**：支持在刚上课时答完所有题目，~~然后去愉快摸鱼~~
-- **多线程支持**：可以同时监听多门正在上课的课程
-- **批量解题**：一键让 AI 解答整门课的未答题目，带进度条，可随时停止
-- **可视化界面**：跟随系统的浅色 / 深色主题，分级着色的日志，课程与题目进度一目了然
+- **自动签到**：检测到上课后自动签到并开始监听
+- **四种答题方式**：从「只提示我」到「AI 解答并直接提交」，自己选替你做到哪一步
+- **AI 解题**：支持 Anthropic、OpenAI Responses（Codex）、OpenAI Chat、通义千问四种接口格式；
+  可批量解答整门课，也能单题解答、讲解思路、复核答案
+- **不用盯着屏幕**：系统通知 + 提示音 + 屏幕角落浮窗；点名点到你会连响三声并把窗口拉到最前
+- **课后复习**：每节课的题目、答案、AI 讲解自动存档，可回看；课件截图一键导出 PDF
+- **多课程并行**：同时有多门课在上也能一起监听
 
-## 安装
+## 安装与运行
 
 ```bash
 pip install -r requirements.txt
-```
-
-只使用 GLM 的话可以不装 `dashscope`，程序会在选择通义千问时才导入它。
-
-## 使用
-
-```bash
 python main.py
 ```
 
-1. **设置**：点击右上角「设置」，在「AI 服务」页选接口格式、填 API Key，点「测试连接」确认可用。
-2. **登录**：点击「登录」，用微信扫描二维码。二维码 60 秒自动刷新，也可手动点「刷新二维码」。
-3. **启动监听**：点击「启动监听」（快捷键 `F5`）。检测到正在上课的课程会自动签到并加入列表。
-4. **答题**：双击课程名打开题目列表。
-   - 「AI 解答全部未答题」会并发调用 AI 解答所有还没有答案的题目
-   - 双击单道题可以看大图、手动改答案、单独让 AI 重答，或直接「提交到雨课堂」
-   - 已提交到雨课堂的题目会被锁定，批量解答时也会自动跳过
+首次打开会有上手清单引导你走完「登录 → 配置 AI → 选答题方式」。
 
-**测试模式**可以在没有课的时候熟悉整套操作，它使用本地示例题目，不会发出任何网络请求。
+界面是本地 HTML，跑在系统自带的浏览器内核里（macOS 用 WebKit，Windows 用 WebView2），
+不需要装 Chrome，也不会开端口。
 
-## 支持的 AI 接口格式
+## 答题方式
 
-Base URL 只填到域名，路径由所选格式自动补全。**不预填任何默认地址和模型**——
-预置一个陌生网关等于把你的 API Key 默认发到第三方服务器上。填好地址和 Key 后，
-点「获取模型列表」可以直接从服务端拉取可用模型，不用凭空猜模型名。
-
-| 格式 | 请求地址 | 适用 |
-| --- | --- | --- |
-| Anthropic | `{Base URL}/v1/messages` | GLM、Claude，以及各类 Anthropic 兼容网关 |
-| OpenAI Responses | `{Base URL}/v1/responses` | Codex 等使用 Responses API 的服务 |
-| OpenAI Chat Completions | `{Base URL}/v1/chat/completions` | 最通用的第三方中转 |
-| 通义千问 dashscope | 官方 SDK | 只需 API Key（[获取方法](https://help.aliyun.com/zh/model-studio/get-api-key)） |
-
-### 思考强度
-
-可选 关闭 / 最低 / 低 / 中 / 高 / 极高 / 最高，界面上会直接显示这一档实际发出去的参数：
-
-- **Anthropic**：`thinking: {type: "adaptive"}` + `output_config.effort`
-  （`low`/`medium`/`high`/`xhigh`/`max`）。`budget_tokens` 已废弃——在 Opus 4.6 /
-  Sonnet 4.6 上弃用，在 Fable 5/5.1、Opus 5/4.8/4.7、Sonnet 5 上会直接返回 400，
-  所以不再使用。若网关只认旧写法，程序会自动回退一次到 `budget_tokens`。
-- **OpenAI 两种格式**：透传为 `reasoning.effort` / `reasoning_effort`
-
-只对接口形状上不存在的档位做无损靠拢（Anthropic 无 `minimal` → `low`，OpenAI 无
-`max` → `xhigh`）。`xhigh` 能否使用**取决于模型而非接口**（需要 gpt-5.1-codex-max
-或 gpt-5.3-codex），这类不做限制，模型不支持时服务端返回 400，程序会提示你调低一档。
-
-## 答题策略
-
-设置里「课上推送新题目时」决定程序替你做到哪一步，四选一：
-
-| 模式 | 行为 |
+| 方式 | 程序做到哪一步 |
 | --- | --- |
-| 只提示我 | 只在消息区提醒有新题，全部自己动手 |
-| 只提交我已保存的答案 | 提交事先填好的答案；**没有答案的题只提醒，绝不调用 AI** |
-| 让 AI 解答，弹窗问过我再提交 | AI 解答后弹确认框给你过目，同意才提交；拒绝或超时都不提交，答案保留在题目里供手动处理 |
-| 让 AI 解答并直接提交 | 全自动，会即时消耗额度且来不及人工核对 |
+| 只提示我 | 只提醒有新题，全部自己作答 |
+| 只交已保存的答案 | 提交你事先填好的答案；没答案的题只提醒，**不会**调用 AI |
+| AI 解答，问过我再交 | AI 答完弹窗给你过目，同意才提交；拒绝或超时都不提交，答案会留着供手动处理 |
+| AI 解答并直接交 | 全自动，来不及人工核对 |
 
-另有「提交延迟」（随机或固定秒数，避免秒答）与「确认框等待秒数」（超时按不提交处理，且不会超过题目剩余时间）。
+限时题的 AI 超时会按剩余时间自动收敛，不会因为等满默认超时而错过。
+
+## AI 接口
+
+地址和模型**不预填**——预置一个陌生网关等于把你的 Key 默认发给第三方，必须自己填。
+填好地址和 Key 后可以点「获取列表」拉取该服务支持的模型。
+
+| 格式 | 请求地址 | 说明 |
+| --- | --- | --- |
+| Anthropic | `{地址}/v1/messages` | Claude、GLM 及各类兼容网关 |
+| OpenAI Responses | `{地址}/v1/responses` | Codex 系模型走这个 |
+| OpenAI Chat | `{地址}/v1/chat/completions` | 最通用的第三方中转 |
+| 通义千问 | 官方 SDK | 需要额外装 `dashscope` |
+
+**思考强度**：关闭 / 最低 / 低 / 中 / 高 / 极高 / 最高。
+Anthropic 走 `thinking: adaptive` + `output_config.effort`（`budget_tokens` 已废弃，
+新模型会直接拒绝）；OpenAI 走 `reasoning.effort`。
+能用哪几档**取决于模型**而不是接口，用不了时会提示你调低一档。
 
 ## 文件位置
 
-配置和题目截图存放在用户数据目录，不再依赖启动时的工作目录：
+配置、课件截图、课堂存档都在用户数据目录，设置页有「打开数据目录」：
 
 - macOS：`~/Library/RainClassroomAssistant/`
 - Windows：`%APPDATA%\RainClassroomAssistant\`
@@ -87,16 +64,27 @@ Base URL 只填到域名，路径由所选格式自动补全。**不预填任何
 ## 项目结构
 
 ```
-main.py                      入口，DPI 处理与启动错误兜底
+main.py            入口，创建窗口
+Bridge.py          JS ⇄ Python 桥
 Scripts/
-  Utils.py                   配置读写、HTTP 会话、雨课堂接口
-  Classes.py                 Lesson：签到、websocket 收题、自动答题、弹幕
-  AI.py                      多服务商 AI 封装、JSON 解析、重试、连通性测试
-UI/
-  Theme.py                   配色、字体、ttk 样式与通用小部件
-  MainWindow.py              主窗口
-  Login.py / Config.py       登录与设置对话框
-  ProblemListWindow.py       题目列表 + 批量 AI 解答
-  ProblemDetailWindow.py     题目详情 + 单题作答
-  TestData.py                测试模式的本地假数据
+  App.py           控制器：所有业务状态与流程
+  Classes.py       Lesson：签到、websocket 收题、自动答题、弹幕
+  AI.py            四种接口格式、思考强度、重试与超时
+  Notify.py        系统通知与提示音
+  LoginFlow.py     扫码登录
+  History.py       课堂存档
+  Export.py        课件导出 PDF
+  Utils.py         配置读写、HTTP、雨课堂接口
+web/               界面（HTML/CSS/JS）
+tests/             离线回归测试
 ```
+
+界面与业务完全分离：`Scripts/` 不依赖任何界面代码，全部逻辑都能脱离界面测试。
+
+## 测试
+
+```bash
+for t in tests/test_*.py; do python "$t" || break; done
+```
+
+全部不联网、不需要账号。`web/index.html?mock` 可以在普通浏览器里用假数据预览界面。
