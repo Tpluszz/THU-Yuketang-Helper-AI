@@ -24,6 +24,11 @@ AI_PROMPT = ('请以JSON格式回答图片中的问题。如果是选择题，�
              '如果是主观题，则返回{"question": "问题", "answer": ["主观题答案"]}')
 
 # 复核提示词：把候选答案连同原图一起发回去，让模型自查一遍
+EXPLAIN_PROMPT = ('请解答图片中的这道题，并讲清楚思路，帮助学生理解。以 JSON 返回：'
+                  '{"question": "题目", "answer": [答案], '
+                  '"explanation": "解题思路：先说考点，再一步步推理，最后说明为什么选这个/为什么其他选项不对，200 字以内"}。'
+                  '答案格式：选择题用 A/B/C/...（方框为多选、圆圈为单选），填空题按空的顺序给出，主观题给出完整作答。只返回 JSON。')
+
 REVIEW_PROMPT = ('请复核图片中这道题的答案。候选答案是：%s\n'
                  '如果候选答案正确，返回 {"ok": true, "answer": [候选答案]}；'
                  '如果不正确，返回 {"ok": false, "answer": [你认为正确的答案], "reason": "一句话说明理由"}。'
@@ -373,7 +378,7 @@ def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"
                 body["thinking"] = {"type": "adaptive"}
                 body["output_config"] = {"effort": "low"}
                 result = _post(url, headers, body, timeout)
-                return _normalize_answer(_extract_json(_anthropic_text(result)).get("answer"))
+                return _anthropic_text(result)
             raise
         # 部分老网关只认早已废弃的 budget_tokens 写法，被拒时回退一次再试
         if not _looks_like_thinking_error(exc):
@@ -384,7 +389,7 @@ def call_anthropic(api_key, image_path, prompt, base_url, model, effort="medium"
         legacy["thinking"] = {"type": "enabled", "budget_tokens": budget}
         legacy["max_tokens"] = budget + 2048     # max_tokens 必须大于思考预算
         result = _post(url, headers, legacy, timeout)
-    return _normalize_answer(_extract_json(_anthropic_text(result)).get("answer"))
+    return _anthropic_text(result)
 
 
 def _anthropic_text(result):
@@ -414,7 +419,7 @@ def call_openai_responses(api_key, image_path, prompt, base_url, model, effort="
         body["reasoning"] = {"effort": effort}
 
     result = _post(_base(base_url, "openai_responses") + "/v1/responses", headers, body, timeout)
-    return _normalize_answer(_extract_json(_responses_text(result)).get("answer"))
+    return _responses_text(result)
 
 
 def _responses_text(result):
@@ -462,7 +467,7 @@ def call_openai_chat(api_key, image_path, prompt, base_url, model, effort="mediu
     text = message.get("content")
     if isinstance(text, list):      # 少数实现把 content 也返回成块数组
         text = "".join(b.get("text", "") for b in text if isinstance(b, dict))
-    return _normalize_answer(_extract_json(text).get("answer"))
+    return text
 
 
 def call_qwen(api_key, image_path, prompt, base_url=None, model=None, effort="off", timeout=None):
@@ -488,7 +493,7 @@ def call_qwen(api_key, image_path, prompt, base_url=None, model=None, effort="of
         json_output = response["output"]["choices"][0]["message"].content[0]["text"]
     except (KeyError, IndexError, TypeError):
         raise AIError("通义千问返回格式异常：%s" % str(response)[:200])
-    return _normalize_answer(_extract_json(json_output).get("answer"))
+    return json_output
 
 
 DISPATCH = {
@@ -504,11 +509,8 @@ call_glm = call_anthropic
 
 # ---------------------------------------------------------------- 入口
 
-def call_ai(config, image_path, prompt=AI_PROMPT, timeout=None):
-    """根据配置中的 ai_config 选择接口格式并返回 answer 列表。
-
-    timeout 用于课上答题：题目只剩几十秒时，没必要等满默认超时。
-    """
+def call_ai_text(config, image_path, prompt=AI_PROMPT, timeout=None):
+    """按配置调用 AI，返回模型的正文文本（未解析）。"""
     ai_config = (config or {}).get("ai_config", {})
     provider = normalize_provider(ai_config.get("provider"))
     api_key = (ai_config.get("api_key") or "").strip()
@@ -524,20 +526,44 @@ def call_ai(config, image_path, prompt=AI_PROMPT, timeout=None):
         timeout=timeout)
 
 
+def call_ai_json(config, image_path, prompt=AI_PROMPT, timeout=None):
+    """按配置调用 AI 并解析出 JSON 对象。"""
+    return _extract_json(call_ai_text(config, image_path, prompt, timeout))
+
+
+def call_ai(config, image_path, prompt=AI_PROMPT, timeout=None):
+    """根据配置中的 ai_config 选择接口格式并返回 answer 列表。
+
+    timeout 用于课上答题：题目只剩几十秒时，没必要等满默认超时。
+    """
+    return _normalize_answer(call_ai_json(config, image_path, prompt, timeout).get("answer"))
+
+
+def explain_problem(config, image_path, timeout=None):
+    """解答并讲解思路，返回 {"answer": [...], "explanation": "..."}。"""
+    obj = call_ai_json(config, image_path, EXPLAIN_PROMPT, timeout)
+    explanation = str(obj.get("explanation") or obj.get("analysis") or "").strip()
+    if not explanation:
+        raise AIError("AI 没有给出解题思路，可以换个模型或调高思考强度再试")
+    return {"answer": _normalize_answer(obj.get("answer")), "explanation": explanation}
+
+
 def review_answer(config, image_path, answers, timeout=None):
     """让 AI 复核一遍候选答案。
 
-    返回 (最终答案, 是否被改过)。复核只是加一道保险，
-    调用方负责在它失败时沿用原答案，而不是把整次作答弄丢。
+    返回 {"ok": 是否认可, "answer": 最终答案, "changed": 是否被改, "reason": 理由}。
+    复核只是加一道保险，调用方应在它失败时沿用原答案。
     """
     original = [str(a) for a in (answers or [])]
     if not original:
-        return original, False
-    shown = "、".join(original)
-    reviewed = call_ai(config, image_path, REVIEW_PROMPT % shown, timeout=timeout) or original
-    reviewed = [str(a) for a in reviewed]
+        raise AIError("还没有答案，没法复核")
+    obj = call_ai_json(config, image_path, REVIEW_PROMPT % "、".join(original), timeout)
+    reviewed = [str(a) for a in _normalize_answer(obj.get("answer"))] or original
     changed = [a.strip() for a in reviewed] != [a.strip() for a in original]
-    return reviewed, changed
+    ok = obj.get("ok")
+    ok = (not changed) if ok is None else bool(ok) and not changed
+    return {"ok": ok, "answer": reviewed, "changed": changed,
+            "reason": str(obj.get("reason") or "").strip()}
 
 
 def list_models(ai_config):

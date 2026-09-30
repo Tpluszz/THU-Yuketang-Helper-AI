@@ -2,6 +2,7 @@
 """测试模式用的假数据：不联网、不签到，纯粹用来熟悉界面操作。"""
 import os
 import threading
+import time
 
 from Scripts.Classes import Lesson
 from Scripts.Utils import get_output_dir
@@ -102,6 +103,11 @@ class TestLesson(Lesson):
         self.config = main_ui.config
         self.main_ui = main_ui
         self._lock = threading.RLock()
+        self.readonly = False
+        self.archive = False            # 测试数据不进课堂存档
+        self.presentations = ["test"]
+        self.started_at = time.time()
+        self.ended_at = None
         self.user_uid = 0
         self.user_uname = "测试用户"
         self._prepare_images()

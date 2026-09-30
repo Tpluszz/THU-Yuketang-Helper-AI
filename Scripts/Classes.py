@@ -76,6 +76,11 @@ class Lesson:
         self.classmates_ls = []
         self.finished = False
         self.stopped = False
+        self.readonly = False
+        self.archive = True             # 是否写入课堂存档（测试课程为 False）
+        self.presentations = []         # 本节课出现过的课件 id，导出 PDF 用
+        self.started_at = time.time()
+        self.ended_at = None
         self.wsapp = None
         self.add_message = main_ui.add_message
         self.config = main_ui.config
@@ -194,6 +199,8 @@ class Lesson:
         """拉取一个课件里的题目并并入列表，异常只记录不抛出。"""
         if not presentationid:
             return
+        if presentationid not in self.presentations:
+            self.presentations.append(presentationid)
         try:
             self._merge_problems(self.get_problems(presentationid))
         except Exception as exc:
@@ -337,7 +344,10 @@ class Lesson:
 
             # 确认模式：先让用户过目，同意了才提交
             if answers and mode == "ai_confirm":
-                if not self._ask_confirm(problem, answers, limit):
+                confirmed = self._ask_confirm(problem, answers, limit)
+                # 用户可能在确认框里改了答案，以题目上的最新答案为准
+                answers = problem.get("answers") or answers
+                if not confirmed:
                     self.add_message("%s 第%s页未确认，已跳过提交（答案已保留，可手动提交）"
                                      % (self.lessonname, page), 8)
                     return
@@ -448,6 +458,8 @@ class Lesson:
             elif op == "lessonfinished":
                 self.add_message("%s 下课了" % self.lessonname, 0)
                 self.finished = True
+                self.ended_at = time.time()
+                self.notify_update()
                 self.notify_event("lesson", "下课了", "%s 已下课，共 %d 道题，已提交 %d 道"
                                   % (self.lessonname, self.problem_count, self.answered_count))
                 wsapp.close()

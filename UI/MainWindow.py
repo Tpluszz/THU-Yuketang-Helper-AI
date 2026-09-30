@@ -17,7 +17,7 @@ from UI.Login import LoginDialog
 from UI.Notify import Notifier
 from UI.Onboarding import OnboardingDialog
 from UI.ProblemListWindow import ProblemListWindow
-from UI.TestData import create_test_lesson, get_test_lessons
+from Scripts.TestData import create_test_lesson, get_test_lessons
 
 # 消息等级 -> (前缀, 文本标签)
 LEVELS = {
