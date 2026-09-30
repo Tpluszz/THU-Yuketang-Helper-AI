@@ -115,6 +115,7 @@
       enter_test_mode: () => ok({ lessonId: "L1" }), exit_test_mode: () => ok(),
       login_start: () => ok(), login_refresh: () => ok(), login_cancel: () => ok(),
       set_onboarded: () => ok({ settings }), test_notify: () => ok(),
+      logout: () => { state.login = { state: 'none', name: '' }; return ok(); },
       delete_history: () => ok(), export_pdf: () => ok({ pages: 32, path: "/tmp/x.pdf" }),
       cancel_solve_all: () => ok(), confirm_decide: () => ok(), open_config_dir: () => ok(), reveal: () => ok(),
     },

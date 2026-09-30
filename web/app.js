@@ -944,10 +944,11 @@ function paintSettings() {
     '<div class="page-head"><h1 class="page-title">设置</h1></div>' +
     '<div class="settings">' +
       '<nav class="settings-nav">' +
-        '<a href="#set-answer">答题方式</a><a href="#set-ai">AI 服务</a>' +
+        '<a href="#set-account">账号</a><a href="#set-answer">答题方式</a><a href="#set-ai">AI 服务</a>' +
         '<a href="#set-notify">提醒与启动</a><a href="#set-misc">弹幕与外观</a>' +
       "</nav>" +
       "<div>" +
+        accountCard() +
         answerCard(meta, mode, answer) +
         aiCard(meta, ai, provider) +
         notifyCard(meta, notify) +
@@ -960,6 +961,24 @@ function paintSettings() {
     "</div></div>";
   bindSettings();
   updateSaveBar();
+}
+
+function accountCard() {
+  const st = S.state;
+  const ok = st.login.state === "ok";
+  const ui = LOGIN_UI[st.login.state] || LOGIN_UI.checking;
+  const who = ok ? (st.login.name || "已登录") : ui.who;
+  return '<div class="card set-card" id="set-account"><h3>账号</h3>' +
+    '<div class="hint">登录状态只保存在本机，退出后会清除。</div>' +
+    '<div class="input-row" style="margin-top:4px">' +
+      '<span class="dot" style="width:9px;height:9px;border-radius:50%;background:' + ui.color + '"></span>' +
+      '<span style="font-weight:650">' + esc(who) + "</span>" +
+      '<span class="hint">' + esc(ok ? "雨课堂账号正常" : ui.sub) + "</span>" +
+      '<div class="spacer"></div>' +
+      (ok ? '<button class="btn sm" data-act="switch-account">换个账号登录</button>' +
+            '<button class="btn sm ghost danger-ghost" data-act="logout">退出登录</button>'
+          : '<button class="btn sm primary" data-act="login">扫码登录</button>') +
+    "</div></div>";
 }
 
 function answerCard(meta, mode, answer) {
@@ -1155,8 +1174,21 @@ const ACTIONS = {
 
   account: () => {
     const st = S.state;
-    if (st && st.login.state === "ok") switchView("settings");
+    if (st && st.login.state === "ok") switchView("settings", "account");
     else openLoginModal();
+  },
+  logout: async () => {
+    if (!confirm("退出登录？\n会停止监听并清除本机保存的登录状态，答题记录和设置都保留。")) return;
+    const res = await api.logout();
+    if (!res.ok) return toastMsg(res.error || "退出失败", "error");
+    toastMsg("已退出登录");
+    if (S.view === "settings") renderSettings("account");
+  },
+  "switch-account": async () => {
+    // 先退掉当前账号，再拉起扫码；否则扫的还是同一个人
+    const res = await api.logout();
+    if (!res.ok) return toastMsg(res.error || "切换失败", "error");
+    openLoginModal();
   },
   login: () => openLoginModal(),
   "close-login": () => { if (loginOverlay) closeModal(loginOverlay); },
