@@ -259,7 +259,8 @@ button.stat:hover { border-color: var(--border-strong); box-shadow: var(--shadow
   padding: 42px 24px; text-align: center; color: var(--muted);
   border: 1.5px dashed var(--border-strong); border-radius: var(--radius); background: var(--surface-2);
 }
-.empty svg { width: 44px; height: 44px; color: var(--faint); margin-bottom: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+/* 只作用于空状态自己的插图；写成后代选择器会把里面按钮的图标也放大 */
+.empty > svg { width: 44px; height: 44px; color: var(--faint); margin-bottom: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .empty h3 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
 .empty p { margin: 0 0 16px; font-size: 13px; }
 .empty .actions { display: flex; gap: 8px; justify-content: center; }
@@ -456,13 +457,15 @@ button.stat:hover { border-color: var(--border-strong); box-shadow: var(--shadow
   border-left: 4px solid var(--accent); box-shadow: var(--shadow-lg); padding: 12px 14px;
   cursor: pointer; animation: slidein .22s cubic-bezier(.2, .9, .3, 1.1);
 }
-@keyframes slidein { from { transform: translateX(24px); opacity: 0; } }
+/* 纵向淡入：横向位移会让浮窗在动画期间探出视口右缘，
+   而且动画一旦被浏览器节流卡住就会永久偏出去 */
+@keyframes slidein { from { transform: translateY(10px); opacity: 0; } }
 .toast.urgent { border-left-color: var(--danger); background: var(--danger-soft); }
 .toast .tt { font-weight: 650; font-size: 13.5px; }
 .toast.urgent .tt { color: var(--danger); }
 .toast .tm { font-size: 12.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
 .toast.out { animation: slideout .18s forwards; }
-@keyframes slideout { to { transform: translateX(24px); opacity: 0; } }
+@keyframes slideout { to { transform: translateY(6px); opacity: 0; } }
 
 /* 上手清单 */
 .steps { display: flex; flex-direction: column; }

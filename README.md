@@ -87,4 +87,7 @@ tests/             离线回归测试
 for t in tests/test_*.py; do python "$t" || break; done
 ```
 
-全部不联网、不需要账号。`web/index.html?mock` 可以在普通浏览器里用假数据预览界面。
+全部不联网、不需要账号。
+
+界面另有一套自检：`web/index.html?mock` 用假数据预览，`web/audit.js` 会走过 28 个
+界面状态检查图标尺寸、元素溢出、文字裁切等问题。详见 [tests/README.md](tests/README.md)。
